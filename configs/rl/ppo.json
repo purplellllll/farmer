@@ -1,0 +1,42 @@
+{
+  "schema_version": "farmer-rl-training/v1",
+  "environment": {
+    "configuration": {
+      "episodeSteps": 720
+    },
+    "debug": false
+  },
+  "actions": {
+    "max_hands": 16,
+    "max_orders": 10,
+    "candidate_capacity": 64
+  },
+  "model": {
+    "feature_dim": 32,
+    "max_tokens": 320,
+    "slots": 27,
+    "candidate_capacity": 64,
+    "d_model": 256,
+    "nhead": 8,
+    "layers": 8,
+    "dim_feedforward": 1024,
+    "dropout": 0.1
+  },
+  "bc": {
+    "lr": 0.0003,
+    "epochs": 3
+  },
+  "training": {
+    "lr": 0.0003,
+    "gamma": 0.999,
+    "gae_lambda": 0.95,
+    "clip_param": 0.2,
+    "train_batch_size": 14400
+  },
+  "self_play": {
+    "checkpoint_slots": 4,
+    "promotion_interval": 5,
+    "seat_swap": true,
+    "selection_metric": "paired_seed_win_rate"
+  }
+}

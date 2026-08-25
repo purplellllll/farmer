@@ -1,0 +1,57 @@
+{
+  "n_splits": 5,
+  "random_state": 20260825,
+  "class_balance": "sqrt_balanced",
+  "unsupported_weight_strategy": "weighted_resample",
+  "calibration": "temperature",
+  "prediction": "hybrid",
+  "hybrid_blend_weight": 0.5,
+  "stacker_c": 1.0,
+  "blend_iterations": 400,
+  "blend_learning_rate": 0.05,
+  "group_by_seed": true,
+  "skip_failed_models": true,
+  "model_size_budget_mib": 95.0,
+  "models": [
+    {
+      "name": "lightgbm",
+      "enabled": true,
+      "params": {"n_estimators": 180, "num_leaves": 31, "max_depth": 10}
+    },
+    {
+      "name": "xgboost",
+      "enabled": true,
+      "params": {"n_estimators": 180, "max_depth": 7, "tree_method": "hist"}
+    },
+    {
+      "name": "catboost",
+      "enabled": true,
+      "params": {"iterations": 180, "depth": 7}
+    },
+    {
+      "name": "hgbc",
+      "enabled": true,
+      "params": {"max_iter": 180, "max_leaf_nodes": 31}
+    },
+    {
+      "name": "extra_trees",
+      "enabled": true,
+      "params": {"n_estimators": 160, "max_depth": 16, "min_samples_leaf": 2}
+    },
+    {
+      "name": "logistic_regression",
+      "enabled": true,
+      "params": {"C": 1.0, "max_iter": 500}
+    },
+    {
+      "name": "ft_transformer",
+      "enabled": true,
+      "params": {"device": "cpu", "max_epochs": 64, "batch_size": 256}
+    },
+    {
+      "name": "realmlp",
+      "enabled": true,
+      "params": {"device": "cpu", "n_epochs": 64, "batch_size": 256}
+    }
+  ]
+}

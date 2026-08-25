@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "farmer-kaggriculture"
+version = "0.1.0"
+description = "Leakage-aware RL and tabular ensemble foundations for Kaggriculture agents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "scikit-learn>=1.4",
+]
+
+[project.optional-dependencies]
+boosting = [
+  "catboost>=1.2",
+  "lightgbm>=4.3",
+  "xgboost>=2.0",
+]
+tabular-neural = [
+  "pytabkit>=1.3",
+]
+rl = [
+  "gymnasium>=0.28",
+  "kaggle-environments==1.32.7",
+  "ray[rllib]>=2.40,<3",
+  "torch>=2.2",
+]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+farmer-ensemble = "farmer_ensemble.cli:main"
+farmer-rl = "farmer_rl.train:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

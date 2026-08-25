@@ -1,0 +1,56 @@
+{
+  "schema_version": "farmer-rl-opponent-pool/v1",
+  "pfsp_power": 1.0,
+  "opponents": [
+    {
+      "opponent_id": "official-pass",
+      "kind": "kaggle_builtin",
+      "weight": 0.1,
+      "enabled": true,
+      "artifact": "pass",
+      "source_id": "kaggle-environments-official",
+      "frozen": true,
+      "tags": ["curriculum", "weak"]
+    },
+    {
+      "opponent_id": "official-random",
+      "kind": "kaggle_builtin",
+      "weight": 0.1,
+      "enabled": true,
+      "artifact": "random",
+      "source_id": "kaggle-environments-official",
+      "frozen": true,
+      "tags": ["curriculum", "stochastic"]
+    },
+    {
+      "opponent_id": "official-starter",
+      "kind": "kaggle_builtin",
+      "weight": 0.2,
+      "enabled": true,
+      "artifact": "starter",
+      "source_id": "kaggle-environments-official",
+      "frozen": true,
+      "tags": ["curriculum", "baseline"]
+    },
+    {
+      "opponent_id": "licensed-local-experts",
+      "kind": "directory",
+      "weight": 0.3,
+      "enabled": false,
+      "artifact": "artifacts/rl/opponents/licensed",
+      "source_id": "manifest-controlled",
+      "frozen": true,
+      "tags": ["enable-only-after-manifest-validation"]
+    },
+    {
+      "opponent_id": "historical-checkpoints",
+      "kind": "checkpoint_directory",
+      "weight": 0.3,
+      "enabled": false,
+      "artifact": "artifacts/rl/opponents/checkpoints",
+      "source_id": "self-generated",
+      "frozen": true,
+      "tags": ["population", "enable-after-first-promotion"]
+    }
+  ]
+}

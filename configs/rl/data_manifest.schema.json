@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/purplellllll/farmer/configs/rl/data_manifest.schema.json",
+  "title": "Kaggriculture RL data manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "dataset_id", "created_at", "environment", "sources", "splits"],
+  "properties": {
+    "schema_version": {"const": "farmer-rl-data-manifest/v1"},
+    "dataset_id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "package", "version", "package_sha256", "rules_source_commit", "configuration", "rules_hash"],
+      "properties": {
+        "name": {"const": "kaggriculture"},
+        "package": {"const": "kaggle-environments"},
+        "version": {"type": "string"},
+        "package_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "rules_source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "configuration": {"type": "object"},
+        "rules_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_id", "kind", "url", "revision", "license", "license_url", "usage", "redistributable"],
+        "properties": {
+          "source_id": {"type": "string"},
+          "kind": {"enum": ["official_environment", "policy_repository", "self_play", "kaggle_replay", "kaggle_notebook"]},
+          "url": {"type": "string", "format": "uri"},
+          "revision": {"type": "string"},
+          "artifact_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+          "license": {"type": "string"},
+          "license_url": {"type": "string", "format": "uri"},
+          "usage": {"enum": ["allow", "reference_only", "quarantine"]},
+          "redistributable": {"type": "boolean"},
+          "notice_path": {"type": ["string", "null"]},
+          "notes": {"type": "string"}
+        }
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "collector_commit": {"type": "string"},
+        "policy_ids": {"type": "array", "items": {"type": "string"}},
+        "seed_ranges": {"type": "array", "items": {"type": "string"}},
+        "both_seats": {"const": true},
+        "closed_loop": {"const": true}
+      }
+    },
+    "splits": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["episodes", "transitions", "seed_selector"],
+        "properties": {
+          "episodes": {"type": "integer", "minimum": 0},
+          "transitions": {"type": "integer", "minimum": 0},
+          "seed_selector": {"type": "string"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "forbidden_fields_checked": {
+      "type": "array",
+      "items": {
+        "enum": ["opponent_private", "future_town_unlocks", "episode_seed_in_actor_observation", "future_actions"]
+      }
+    }
+  }
+}
