@@ -22,8 +22,10 @@ def _dependencies() -> dict[str, Any]:
     try:
         import gymnasium as gym
         import numpy as np
-        import ray
+        # On Windows, importing Ray before CUDA Torch can initialize DLL search
+        # state that makes c10.dll fail with WinError 1114.  Load Torch first.
         import torch
+        import ray
         from ray.rllib.algorithms.ppo import PPOConfig
         from ray.rllib.env.multi_agent_env import MultiAgentEnv
         from ray.rllib.models import ModelCatalog

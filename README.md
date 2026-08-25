@@ -21,6 +21,7 @@ docs/rl/                licensed sources, strategies and RL architecture
 docs/ensemble/          model selection, validation and training guide
 src/farmer_rl/          environment, trajectories, tokens, actions, BC/PPO
 src/farmer_ensemble/    adapters, grouped OOF, calibration and stacking
+kaggle/ensemble_gpu/    reproducible Kaggle GPU training script
 tests/                  dependency-light unit and smoke tests
 ```
 
@@ -101,6 +102,23 @@ Validate the RL configuration without Ray or Kaggle dependencies:
 farmer-rl validate --config configs/rl/ppo.json
 ```
 
+On an NVIDIA Windows workstation, warm-start the eight-layer Transformer from
+a licensed behaviour-cloning checkpoint and use the checkpointed native PPO
+runner (this avoids Ray worker bootstrap issues seen with CUDA on Windows):
+
+```bash
+farmer-rl native-self-play \
+  --config configs/rl/local_4060.json \
+  --iterations 2100 \
+  --output artifacts/local-4060-gated \
+  --bc-checkpoint checkpoints/starter_bc_v5.pt
+```
+
+The runner alternates the learner seat, applies bounded potential shaping plus
+the terminal win/loss result, samples frozen checkpoints with PFSP-style
+weights, logs one JSON object per iteration, and keeps only the newest local
+checkpoints. `--resume` accepts a native checkpoint after interruption.
+
 Train the ensemble from an NPZ file containing at least `X`, `y`, and `groups`:
 
 ```bash
@@ -109,6 +127,12 @@ farmer-ensemble \
   --config configs/ensemble/default.json \
   --output artifacts/ensemble
 ```
+
+Kaggriculture does not provide a conventional tabular training set. Build
+router/candidate/value labels from licensed or self-generated trajectories
+first; `farmer_ensemble.router_dataset.build_router_npz` creates the bounded
+farmer-action router table used by the Kaggle GPU job. The reproducible Kaggle
+script and metadata live under `kaggle/ensemble_gpu/`.
 
 Run dependency-light tests:
 

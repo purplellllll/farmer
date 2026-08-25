@@ -85,6 +85,16 @@ def fake_make(name: str, configuration: dict, debug: bool):
 
 
 class EnvironmentTests(unittest.TestCase):
+    def test_official_structs_are_recursively_detached(self):
+        class Struct(dict):
+            pass
+
+        value = Struct({"nested": Struct({"items": [Struct({"x": 1})]})})
+        plain = KaggricultureEnv._plain_value(value)
+        self.assertIs(type(plain), dict)
+        self.assertIs(type(plain["nested"]), dict)
+        self.assertIs(type(plain["nested"]["items"][0]), dict)
+
     def test_wrapper_preserves_each_acting_seat(self):
         env = KaggricultureEnv(make_fn=fake_make)
         initial = env.reset(seed=7)
@@ -206,7 +216,13 @@ class OpponentAndConfigTests(unittest.TestCase):
 
     def test_json_configs_parse(self):
         root = Path(__file__).resolve().parents[2]
-        for filename in ("ppo.json", "population.json", "data_manifest.schema.json", "data_manifest.example.json"):
+        for filename in (
+            "ppo.json",
+            "local_4060.json",
+            "population.json",
+            "data_manifest.schema.json",
+            "data_manifest.example.json",
+        ):
             with (root / "configs" / "rl" / filename).open(encoding="utf-8") as handle:
                 self.assertIsInstance(json.load(handle), dict)
 

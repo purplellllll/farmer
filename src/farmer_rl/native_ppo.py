@@ -1,0 +1,490 @@
+"""Single-process CUDA PPO for local Kaggriculture self-play.
+
+This runner exists because Ray's worker bootstrap is unreliable with CUDA on
+some Windows laptops.  It intentionally reuses the exact tokenizer, legal
+candidate codec, and residual Transformer actor-critic used by the RLlib path.
+"""
+
+from __future__ import annotations
+
+from copy import deepcopy
+import json
+import math
+from pathlib import Path
+import random
+import time
+from typing import Any, Callable, Mapping
+
+import numpy as np
+
+from .actions import CandidateGenerator, JointActionCodec
+from .environment import KaggricultureEnv, validate_action
+from .model import ModelConfig, build_actor_critic
+from .tokenizer import ObservationTokenizer
+
+
+def _torch() -> Any:
+    import torch
+
+    return torch
+
+
+def _encoded(
+    observation: Mapping[str, Any],
+    tokenizer: ObservationTokenizer,
+    codec: JointActionCodec,
+) -> dict[str, np.ndarray]:
+    batch = tokenizer.tokenize(observation)
+    return {
+        "tokens": np.asarray(batch.values, dtype=np.float32),
+        "types": np.asarray(batch.token_type_ids, dtype=np.int64),
+        "attention": np.asarray(batch.attention_mask, dtype=np.bool_),
+        "action_mask": np.asarray(codec.mask(observation), dtype=np.bool_),
+    }
+
+
+def _sample(
+    model: Any,
+    encoded: Mapping[str, np.ndarray],
+    *,
+    device: Any,
+    deterministic: bool = False,
+) -> tuple[np.ndarray, float, float]:
+    torch = _torch()
+    with torch.inference_mode(), torch.autocast(
+        device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"
+    ):
+        logits, value = model(
+            torch.as_tensor(encoded["tokens"], device=device).unsqueeze(0),
+            torch.as_tensor(encoded["types"], device=device).unsqueeze(0),
+            torch.as_tensor(encoded["attention"], device=device).unsqueeze(0),
+            torch.as_tensor(encoded["action_mask"], device=device).unsqueeze(0),
+        )
+    distribution = torch.distributions.Categorical(logits=logits.float())
+    actions = logits.argmax(dim=-1) if deterministic else distribution.sample()
+    log_probability = distribution.log_prob(actions).sum(dim=-1)
+    return (
+        actions.squeeze(0).cpu().numpy().astype(np.int64),
+        float(log_probability.item()),
+        float(value.item()),
+    )
+
+
+def _money_difference(observation: Mapping[str, Any], learner_seat: int) -> float:
+    farms = observation.get("farms", [])
+    if not isinstance(farms, list) or len(farms) != 2:
+        return 0.0
+    own = float(farms[learner_seat].get("money", 0.0) or 0.0)
+    other = float(farms[1 - learner_seat].get("money", 0.0) or 0.0)
+    return own - other
+
+
+def _potential(observation: Mapping[str, Any], learner_seat: int) -> float:
+    # Bounded potential-based shaping improves the otherwise terminal-only
+    # signal without changing the optimal policy under the configured gamma.
+    return math.tanh(_money_difference(observation, learner_seat) / 10_000.0)
+
+
+def _cpu_state_dict(model: Any) -> dict[str, Any]:
+    return {name: tensor.detach().cpu().clone() for name, tensor in model.state_dict().items()}
+
+
+def _choose_snapshot(
+    rng: random.Random,
+    stats: list[dict[str, float]],
+    *,
+    power: float,
+) -> int:
+    weights = []
+    for item in stats:
+        games = int(item["games"])
+        win_rate = float(item["wins"]) / games if games else 0.5
+        weights.append(max(0.05, 1.0 - abs(2.0 * win_rate - 1.0)) ** power)
+    return rng.choices(range(len(stats)), weights=weights, k=1)[0]
+
+
+def _collect_episode(
+    learner: Any,
+    opponent: Any | None,
+    opponent_policy: Callable[[dict[str, Any]], Mapping[str, Any]] | None,
+    *,
+    learner_seat: int,
+    seed: int,
+    gamma: float,
+    gae_lambda: float,
+    device: Any,
+    tokenizer: ObservationTokenizer,
+    codec: JointActionCodec,
+    episode_steps: int,
+) -> tuple[list[dict[str, Any]], dict[str, float]]:
+    env = KaggricultureEnv(configuration={"episodeSteps": episode_steps})
+    observations = env.reset(seed=seed)
+    records: list[dict[str, Any]] = []
+    final_rewards = {0: 0.0, 1: 0.0}
+
+    learner.eval()
+    if opponent is not None:
+        opponent.eval()
+    for _ in range(episode_steps):
+        learner_encoded = _encoded(observations[learner_seat], tokenizer, codec)
+        learner_indices, log_probability, value = _sample(
+            learner, learner_encoded, device=device
+        )
+        if opponent_policy is None:
+            if opponent is None:
+                raise ValueError("model or scripted opponent is required")
+            opponent_encoded = _encoded(observations[1 - learner_seat], tokenizer, codec)
+            opponent_indices, _, _ = _sample(opponent, opponent_encoded, device=device)
+            opponent_action = codec.decode(
+                observations[1 - learner_seat], opponent_indices
+            )
+        else:
+            opponent_observation = observations[1 - learner_seat]
+            farms = opponent_observation.get("farms", [])
+            hand_count = len(farms[1 - learner_seat].get("hands", []) or [])
+            opponent_action = validate_action(
+                opponent_policy(deepcopy(opponent_observation)), hand_count=hand_count
+            )
+        actions = {
+            learner_seat: codec.decode(observations[learner_seat], learner_indices),
+            1 - learner_seat: opponent_action,
+        }
+        result = env.step(actions)
+        current_potential = _potential(observations[learner_seat], learner_seat)
+        next_potential = _potential(result.observations[learner_seat], learner_seat)
+        reward = gamma * next_potential - current_potential
+        final_rewards = result.rewards
+        records.append(
+            {
+                **learner_encoded,
+                "actions": learner_indices,
+                "old_log_probability": log_probability,
+                "old_value": value,
+                "reward": reward,
+                "done": result.terminated or result.truncated,
+            }
+        )
+        observations = result.observations
+        if result.terminated or result.truncated:
+            break
+
+    score_difference = final_rewards[learner_seat] - final_rewards[1 - learner_seat]
+    outcome = 1.0 if score_difference > 0 else 0.0 if score_difference < 0 else 0.5
+    if records:
+        records[-1]["reward"] += 2.0 * outcome - 1.0
+
+    advantage = 0.0
+    next_value = 0.0
+    for record in reversed(records):
+        continuation = 0.0 if record["done"] else 1.0
+        delta = (
+            float(record["reward"])
+            + gamma * next_value * continuation
+            - float(record["old_value"])
+        )
+        advantage = delta + gamma * gae_lambda * continuation * advantage
+        record["advantage"] = advantage
+        record["return"] = advantage + float(record["old_value"])
+        next_value = float(record["old_value"])
+    return records, {
+        "outcome": outcome,
+        "score_difference": score_difference,
+        "steps": float(len(records)),
+    }
+
+
+def _stack(records: list[dict[str, Any]]) -> dict[str, Any]:
+    torch = _torch()
+    result: dict[str, Any] = {}
+    for key in ("tokens", "types", "attention", "action_mask", "actions"):
+        result[key] = torch.from_numpy(np.stack([item[key] for item in records]))
+    for key in ("old_log_probability", "old_value", "advantage", "return"):
+        result[key] = torch.tensor([item[key] for item in records], dtype=torch.float32)
+    advantages = result["advantage"]
+    result["advantage"] = (advantages - advantages.mean()) / advantages.std().clamp_min(1e-6)
+    return result
+
+
+def _update(
+    model: Any,
+    optimizer: Any,
+    batch: Mapping[str, Any],
+    *,
+    device: Any,
+    minibatch_size: int,
+    epochs: int,
+    clip_param: float,
+    value_coeff: float,
+    entropy_coeff: float,
+    grad_clip: float,
+    target_kl: float,
+) -> dict[str, float]:
+    torch = _torch()
+    model.train()
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
+    sample_count = len(batch["advantage"])
+    totals = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "kl": 0.0}
+    updates = 0
+    stopped_early = False
+    for _ in range(epochs):
+        indices = torch.randperm(sample_count)
+        for start in range(0, sample_count, minibatch_size):
+            selected = indices[start : start + minibatch_size]
+            tensors = {key: value[selected].to(device, non_blocking=True) for key, value in batch.items()}
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.float16,
+                enabled=device.type == "cuda",
+            ):
+                logits, values = model(
+                    tensors["tokens"],
+                    tensors["types"],
+                    tensors["attention"],
+                    tensors["action_mask"],
+                )
+                distribution = torch.distributions.Categorical(logits=logits.float())
+                log_probability = distribution.log_prob(tensors["actions"]).sum(dim=-1)
+                ratio = (log_probability - tensors["old_log_probability"]).exp()
+                unclipped = ratio * tensors["advantage"]
+                clipped = ratio.clamp(1.0 - clip_param, 1.0 + clip_param) * tensors["advantage"]
+                policy_loss = -torch.minimum(unclipped, clipped).mean()
+                value_loss = 0.5 * (values.float() - tensors["return"]).square().mean()
+                entropy = distribution.entropy().sum(dim=-1).mean()
+                loss = policy_loss + value_coeff * value_loss - entropy_coeff * entropy
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+            with torch.no_grad():
+                approximate_kl = (tensors["old_log_probability"] - log_probability).mean()
+            totals["policy_loss"] += float(policy_loss.item())
+            totals["value_loss"] += float(value_loss.item())
+            totals["entropy"] += float(entropy.item())
+            totals["kl"] += float(approximate_kl.item())
+            updates += 1
+            if updates >= 2 and float(approximate_kl.item()) > target_kl:
+                stopped_early = True
+                break
+        if stopped_early:
+            break
+    return {key: value / max(1, updates) for key, value in totals.items()}
+
+
+def _write_json(path: Path, value: Mapping[str, Any]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(dict(value), handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+
+
+def run_native_self_play(
+    config: Mapping[str, Any],
+    *,
+    iterations: int,
+    output_dir: str | Path,
+    resume: str | Path | None = None,
+    bc_checkpoint: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Run checkpointed single-process PPO and return compact iteration metrics."""
+
+    torch = _torch()
+    if not torch.cuda.is_available():
+        raise RuntimeError("native PPO was requested for GPU training but CUDA is unavailable")
+    device = torch.device("cuda")
+    training = dict(config.get("training", {}))
+    native = dict(config.get("native", {}))
+    self_play = dict(config.get("self_play", {}))
+    model_config = ModelConfig.from_dict(dict(config.get("model", {})))
+    seed = int(native.get("seed", 20260825))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cuda.matmul.allow_tf32 = True
+
+    model = build_actor_critic(model_config).to(device)
+    opponent = build_actor_critic(model_config).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(training.get("lr", 3e-4)),
+        weight_decay=float(native.get("weight_decay", 0.01)),
+    )
+    snapshots = [_cpu_state_dict(model)]
+    snapshot_stats: list[dict[str, float]] = [{"games": 0.0, "wins": 0.0}]
+    promotion_outcomes: list[float] = []
+    start_iteration = 0
+    if resume:
+        payload = torch.load(resume, map_location="cpu", weights_only=False)
+        if payload.get("format") != "farmer-native-ppo/v1":
+            raise ValueError("unsupported native PPO checkpoint")
+        model.load_state_dict(payload["model"])
+        optimizer.load_state_dict(payload["optimizer"])
+        snapshots = payload.get("snapshots", snapshots)
+        snapshot_stats = payload.get("snapshot_stats", snapshot_stats)
+        promotion_outcomes = [float(value) for value in payload.get("promotion_outcomes", [])]
+        start_iteration = int(payload.get("iteration", 0))
+    elif bc_checkpoint:
+        payload = torch.load(bc_checkpoint, map_location="cpu", weights_only=False)
+        if payload.get("format") != "farmer-rl-bc/v1":
+            raise ValueError("unsupported behavior-cloning checkpoint")
+        model.load_state_dict(payload["state_dict"], strict=True)
+        snapshots = [_cpu_state_dict(model)]
+
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    checkpoints = output / "checkpoints"
+    checkpoints.mkdir(parents=True, exist_ok=True)
+    metrics_path = output / "metrics.jsonl"
+    _write_json(output / "run_config.json", dict(config))
+
+    gamma = float(training.get("gamma", 0.999))
+    gae_lambda = float(training.get("gae_lambda", 0.95))
+    target_steps = int(native.get("train_batch_steps", 2880))
+    episode_steps = int(config.get("environment", {}).get("configuration", {}).get("episodeSteps", 720))
+    tokenizer = ObservationTokenizer(max_tokens=model_config.max_tokens)
+    codec = JointActionCodec(
+        CandidateGenerator(capacity=model_config.candidate_capacity),
+        max_hands=model_config.slots - 11,
+        max_orders=10,
+    )
+    rng = random.Random(seed + start_iteration)
+    history: list[dict[str, Any]] = []
+    scripted_probability = float(native.get("scripted_opponent_probability", 0.5))
+    if not 0.0 <= scripted_probability <= 1.0:
+        raise ValueError("scripted_opponent_probability must be in [0, 1]")
+    scripted_policy = None
+    if scripted_probability > 0:
+        from kaggle_environments.envs.kaggriculture.kaggriculture import starter_agent
+
+        scripted_policy = starter_agent
+
+    for iteration in range(start_iteration + 1, start_iteration + int(iterations) + 1):
+        started = time.perf_counter()
+        records: list[dict[str, Any]] = []
+        outcomes: list[float] = []
+        score_differences: list[float] = []
+        scripted_outcomes: list[float] = []
+        snapshot_outcomes: list[float] = []
+        games = 0
+        while len(records) < target_steps:
+            use_scripted = scripted_policy is not None and rng.random() < scripted_probability
+            snapshot_index: int | None = None
+            if not use_scripted:
+                snapshot_index = _choose_snapshot(
+                    rng, snapshot_stats, power=float(self_play.get("pfsp_power", 1.0))
+                )
+                opponent.load_state_dict(snapshots[snapshot_index])
+            learner_seat = games % 2
+            episode_records, episode_metrics = _collect_episode(
+                model,
+                None if use_scripted else opponent,
+                opponent_policy=scripted_policy if use_scripted else None,
+                learner_seat=learner_seat,
+                seed=seed + iteration * 10_000 + games,
+                gamma=gamma,
+                gae_lambda=gae_lambda,
+                device=device,
+                tokenizer=tokenizer,
+                codec=codec,
+                episode_steps=episode_steps,
+            )
+            records.extend(episode_records)
+            outcome = float(episode_metrics["outcome"])
+            outcomes.append(outcome)
+            score_differences.append(float(episode_metrics["score_difference"]))
+            if use_scripted:
+                scripted_outcomes.append(outcome)
+            else:
+                assert snapshot_index is not None
+                snapshot_outcomes.append(outcome)
+                promotion_outcomes.append(outcome)
+                snapshot_stats[snapshot_index]["games"] += 1.0
+                snapshot_stats[snapshot_index]["wins"] += outcome
+            games += 1
+
+        update_metrics = _update(
+            model,
+            optimizer,
+            _stack(records),
+            device=device,
+            minibatch_size=int(native.get("minibatch_size", 32)),
+            epochs=int(native.get("update_epochs", 4)),
+            clip_param=float(training.get("clip_param", 0.2)),
+            value_coeff=float(native.get("value_coeff", 0.5)),
+            entropy_coeff=float(native.get("entropy_coeff", 0.002)),
+            grad_clip=float(native.get("grad_clip", 1.0)),
+            target_kl=float(native.get("target_kl", 0.03)),
+        )
+        promotion_interval = int(self_play.get("promotion_interval", 5))
+        pool_size = int(self_play.get("checkpoint_slots", 4))
+        promotion_win_rate = float(np.mean(promotion_outcomes)) if promotion_outcomes else 0.0
+        promotion_due = iteration % promotion_interval == 0
+        promotion_min_games = int(self_play.get("promotion_min_games", 8))
+        promotion_threshold = float(self_play.get("promotion_win_rate", 0.55))
+        promoted = (
+            promotion_due
+            and len(promotion_outcomes) >= promotion_min_games
+            and promotion_win_rate >= promotion_threshold
+        )
+        if promoted:
+            snapshots.append(_cpu_state_dict(model))
+            snapshot_stats.append({"games": 0.0, "wins": 0.0})
+            promotion_outcomes.clear()
+            if len(snapshots) > pool_size:
+                snapshots.pop(0)
+                snapshot_stats.pop(0)
+        elif promotion_due:
+            promotion_outcomes = promotion_outcomes[-max(promotion_min_games * 4, 32) :]
+
+        elapsed = time.perf_counter() - started
+        metrics = {
+            "iteration": iteration,
+            "seconds": elapsed,
+            "steps": len(records),
+            "steps_per_second": len(records) / max(elapsed, 1e-6),
+            "games": games,
+            "learner_win_rate": float(np.mean(outcomes)),
+            "scripted_games": len(scripted_outcomes),
+            "scripted_win_rate": float(np.mean(scripted_outcomes)) if scripted_outcomes else None,
+            "snapshot_games": len(snapshot_outcomes),
+            "snapshot_win_rate": float(np.mean(snapshot_outcomes)) if snapshot_outcomes else None,
+            "promotion_window_games": len(promotion_outcomes),
+            "promotion_window_win_rate": promotion_win_rate,
+            "promoted": promoted,
+            "mean_score_difference": float(np.mean(score_differences)),
+            "pool_size": len(snapshots),
+            "cuda_peak_gib": torch.cuda.max_memory_allocated() / 2**30,
+            "kl_early_stop": bool(update_metrics["kl"] > float(native.get("target_kl", 0.03))),
+            **update_metrics,
+        }
+        history.append(metrics)
+        with metrics_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(metrics, ensure_ascii=False) + "\n")
+        print(json.dumps(metrics, ensure_ascii=False), flush=True)
+
+        checkpoint_interval = int(native.get("checkpoint_interval", 5))
+        if iteration % checkpoint_interval == 0 or iteration == start_iteration + int(iterations):
+            checkpoint_path = checkpoints / f"iteration_{iteration:06d}.pt"
+            torch.save(
+                {
+                    "format": "farmer-native-ppo/v1",
+                    "iteration": iteration,
+                    "model_config": model_config.__dict__,
+                    "model": _cpu_state_dict(model),
+                    "optimizer": optimizer.state_dict(),
+                    "snapshots": snapshots,
+                    "snapshot_stats": snapshot_stats,
+                    "promotion_outcomes": promotion_outcomes,
+                },
+                checkpoint_path,
+            )
+            _write_json(
+                output / "latest.json",
+                {"iteration": iteration, "checkpoint": str(checkpoint_path.resolve())},
+            )
+            keep = max(1, int(native.get("keep_checkpoints", 8)))
+            checkpoint_files = sorted(checkpoints.glob("iteration_*.pt"))
+            for obsolete in checkpoint_files[:-keep]:
+                obsolete.unlink()
+    return history
