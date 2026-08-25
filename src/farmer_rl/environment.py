@@ -115,6 +115,16 @@ class KaggricultureEnv:
         return getattr(state, name, default)
 
     @classmethod
+    def _plain_value(cls, value: Any) -> Any:
+        """Recursively detach Kaggle ``Struct`` objects from observations."""
+
+        if isinstance(value, Mapping):
+            return {str(key): cls._plain_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._plain_value(item) for item in value]
+        return deepcopy(value)
+
+    @classmethod
     def _seat_observations(cls, states: Sequence[Any]) -> dict[int, Observation]:
         if len(states) != 2:
             raise SeatSafetyError(f"Kaggriculture requires exactly two seats, got {len(states)}")
@@ -123,7 +133,7 @@ class KaggricultureEnv:
             raw = cls._field(state, "observation", state)
             if not isinstance(raw, Mapping):
                 raise SeatSafetyError(f"seat {seat} observation is not a mapping")
-            observation = deepcopy(dict(raw))
+            observation = cls._plain_value(raw)
             observed_seat = observation.get("player")
             if observed_seat is None:
                 # Some test doubles omit framework-added fields. Adding the known
