@@ -110,7 +110,7 @@ runner (this avoids Ray worker bootstrap issues seen with CUDA on Windows):
 farmer-rl native-self-play \
   --config configs/rl/local_4060.json \
   --iterations 2100 \
-  --output artifacts/local-4060-72h \
+  --output artifacts/local-4060-gated \
   --bc-checkpoint checkpoints/starter_bc_v5.pt
 ```
 
