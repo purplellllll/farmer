@@ -1,0 +1,60 @@
+{
+  "schema_version": "farmer-rl-data-manifest/v1",
+  "dataset_id": "EXAMPLE-NOT-A-DATASET",
+  "created_at": "2026-08-25T00:00:00Z",
+  "environment": {
+    "name": "kaggriculture",
+    "package": "kaggle-environments",
+    "version": "1.32.7",
+    "package_sha256": "sha256:2a1bb862ad2d6463080f80f6a766f46d94b53fd57168cfeddb9857fc3dbc4c8f",
+    "rules_source_commit": "28b6d8af3ce73926b3d0fda1410c1ddd8384ab8c",
+    "configuration": {"episodeSteps": 720},
+    "rules_hash": "sha256:91298b47c5dd34500177e6cf6c41a9c2ca254804f893d135a7c06c3d920ee739"
+  },
+  "sources": [
+    {
+      "source_id": "kaggle-environments-official",
+      "kind": "official_environment",
+      "url": "https://github.com/Kaggle/kaggle-environments",
+      "revision": "28b6d8af3ce73926b3d0fda1410c1ddd8384ab8c",
+      "artifact_sha256": null,
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/Kaggle/kaggle-environments/blob/28b6d8af3ce73926b3d0fda1410c1ddd8384ab8c/LICENSE",
+      "usage": "allow",
+      "redistributable": true,
+      "notice_path": null,
+      "notes": "Official simulator and built-in pass/random/starter policies."
+    },
+    {
+      "source_id": "self-generated",
+      "kind": "self_play",
+      "url": "https://github.com/purplellllll/farmer",
+      "revision": "0000000000000000000000000000000000000000",
+      "artifact_sha256": null,
+      "license": "project-license-pending",
+      "license_url": "https://github.com/purplellllll/farmer",
+      "usage": "allow",
+      "redistributable": false,
+      "notice_path": null,
+      "notes": "Set redistribution only after the repository license and policy-source notices are final."
+    }
+  ],
+  "generation": {
+    "collector_commit": "0000000000000000000000000000000000000000",
+    "policy_ids": ["official-starter", "learner-v0"],
+    "seed_ranges": ["train:0-999", "validation:1000-1199", "test:1200-1399"],
+    "both_seats": true,
+    "closed_loop": true
+  },
+  "splits": {
+    "train": {"episodes": 0, "transitions": 0, "seed_selector": "0-999", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+    "validation": {"episodes": 0, "transitions": 0, "seed_selector": "1000-1199", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+    "test": {"episodes": 0, "transitions": 0, "seed_selector": "1200-1399", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}
+  },
+  "forbidden_fields_checked": [
+    "opponent_private",
+    "future_town_unlocks",
+    "episode_seed_in_actor_observation",
+    "future_actions"
+  ]
+}

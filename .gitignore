@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+
+# Local training outputs and competition material. Keep manifests/configs in Git,
+# but do not redistribute downloaded competition data or public replays.
+artifacts/
+checkpoints/
+data/raw/
+data/replays/
+replays/
+logs/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.pkl
+*.joblib
