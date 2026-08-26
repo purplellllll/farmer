@@ -285,6 +285,11 @@ class TokenAndActionTests(unittest.TestCase):
         self.assertEqual(action["hands"][:2], [["PLANT", "WHEAT"], ["PLANT", "WHEAT"]])
         self.assertEqual(action["hands"][2], ["PASS"])
 
+    def test_hire_candidate_stops_at_bounded_hand_count(self):
+        obs = observation(0, hands=8)
+        candidates = CandidateGenerator(capacity=64).market_candidates(obs, 0).candidates
+        self.assertNotIn("HIRE", {candidate.action[0] for candidate in candidates})
+
 
 class OpponentAndConfigTests(unittest.TestCase):
     def test_terminal_reward_preserves_win_order_and_dense_loss_margin(self):

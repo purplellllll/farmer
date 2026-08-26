@@ -57,11 +57,20 @@ class CandidateSet:
 class CandidateGenerator:
     """Generate per-unit and market candidates from a player's legal observation."""
 
-    def __init__(self, *, capacity: int = 64, market_quantity_cap: int = 20) -> None:
+    def __init__(
+        self,
+        *,
+        capacity: int = 64,
+        market_quantity_cap: int = 20,
+        max_total_hands: int = 8,
+    ) -> None:
         if capacity < 8:
             raise ValueError("capacity must leave room for common primitive actions")
+        if max_total_hands <= 0:
+            raise ValueError("max_total_hands must be positive")
         self.capacity = int(capacity)
         self.market_quantity_cap = int(market_quantity_cap)
+        self.max_total_hands = int(max_total_hands)
 
     @staticmethod
     def _own_parts(observation: Mapping[str, Any]) -> tuple[int, Mapping[str, Any], Mapping[str, Any]]:
@@ -211,7 +220,10 @@ class CandidateGenerator:
         # guaranteed upper bound in observation. It stays outside the conservative
         # mask until an exact market-state simulator is plugged into the decoder.
         hires_today = int(farm.get("hires_today", 0) or 0)
-        if money >= self._fib(hires_today):
+        if (
+            len(farm.get("hands", []) or []) < self.max_total_hands
+            and money >= self._fib(hires_today)
+        ):
             result.append(ActionCandidate(slot, ("HIRE",), "current cash covers the next Fibonacci hire"))
         quadrants = set(farm.get("unlocked_quadrants", []) or ["NW"])
         next_land_index = max(0, len(quadrants) - 1)
