@@ -128,6 +128,22 @@ def _potential(observation: Mapping[str, Any], learner_seat: int) -> float:
     return math.tanh((value - opponent_money) / 10_000.0)
 
 
+def _terminal_reward(
+    score_difference: float,
+    *,
+    score_coefficient: float,
+    score_scale: float,
+) -> tuple[float, float]:
+    """Return win outcome and a bounded dense terminal training reward."""
+
+    if score_scale <= 0:
+        raise ValueError("terminal_score_scale must be positive")
+    outcome = 1.0 if score_difference > 0 else 0.0 if score_difference < 0 else 0.5
+    win_reward = 2.0 * outcome - 1.0
+    margin_reward = float(score_coefficient) * math.tanh(score_difference / score_scale)
+    return outcome, win_reward + margin_reward
+
+
 def _cpu_state_dict(model: Any) -> dict[str, Any]:
     return {name: tensor.detach().cpu().clone() for name, tensor in model.state_dict().items()}
 
@@ -159,6 +175,8 @@ def _collect_episode(
     tokenizer: ObservationTokenizer,
     codec: JointActionCodec,
     episode_steps: int,
+    terminal_score_coefficient: float,
+    terminal_score_scale: float,
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     env = KaggricultureEnv(configuration={"episodeSteps": episode_steps})
     observations = env.reset(seed=seed)
@@ -233,9 +251,13 @@ def _collect_episode(
             break
 
     score_difference = final_rewards[learner_seat] - final_rewards[1 - learner_seat]
-    outcome = 1.0 if score_difference > 0 else 0.0 if score_difference < 0 else 0.5
+    outcome, terminal_reward = _terminal_reward(
+        score_difference,
+        score_coefficient=terminal_score_coefficient,
+        score_scale=terminal_score_scale,
+    )
     if records:
-        records[-1]["reward"] += 2.0 * outcome - 1.0
+        records[-1]["reward"] += terminal_reward
 
     advantage = 0.0
     next_value = 0.0
@@ -425,6 +447,10 @@ def run_native_self_play(
     gae_lambda = float(training.get("gae_lambda", 0.95))
     target_steps = int(native.get("train_batch_steps", 2880))
     episode_steps = int(config.get("environment", {}).get("configuration", {}).get("episodeSteps", 720))
+    terminal_score_coefficient = float(training.get("terminal_score_coeff", 0.0))
+    terminal_score_scale = float(training.get("terminal_score_scale", 1000.0))
+    if terminal_score_scale <= 0:
+        raise ValueError("training.terminal_score_scale must be positive")
     tokenizer = ObservationTokenizer(max_tokens=model_config.max_tokens)
     codec = JointActionCodec(
         CandidateGenerator(capacity=model_config.candidate_capacity),
@@ -471,6 +497,8 @@ def run_native_self_play(
                 tokenizer=tokenizer,
                 codec=codec,
                 episode_steps=episode_steps,
+                terminal_score_coefficient=terminal_score_coefficient,
+                terminal_score_scale=terminal_score_scale,
             )
             records.extend(episode_records)
             outcome = float(episode_metrics["outcome"])

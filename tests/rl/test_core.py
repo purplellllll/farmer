@@ -15,6 +15,7 @@ from farmer_rl.collector import collect_episode
 from farmer_rl.environment import KaggricultureEnv, pass_action
 from farmer_rl.errors import InvalidActionError, SeatSafetyError
 from farmer_rl.opponents import OpponentPool, OpponentSpec
+from farmer_rl.native_ppo import _terminal_reward
 from farmer_rl.tokenizer import FEATURE_DIM, ObservationTokenizer, TILE_KINDS
 from farmer_rl.trajectory import EpisodeTrajectory, Transition
 
@@ -286,6 +287,20 @@ class TokenAndActionTests(unittest.TestCase):
 
 
 class OpponentAndConfigTests(unittest.TestCase):
+    def test_terminal_reward_preserves_win_order_and_dense_loss_margin(self):
+        close_outcome, close_reward = _terminal_reward(
+            -100, score_coefficient=0.25, score_scale=1000
+        )
+        bad_outcome, bad_reward = _terminal_reward(
+            -3000, score_coefficient=0.25, score_scale=1000
+        )
+        win_outcome, win_reward = _terminal_reward(
+            1, score_coefficient=0.25, score_scale=1000
+        )
+        self.assertEqual((close_outcome, bad_outcome, win_outcome), (0.0, 0.0, 1.0))
+        self.assertGreater(close_reward, bad_reward)
+        self.assertGreater(win_reward, close_reward)
+
     def test_pfsp_prefers_near_even_opponent(self):
         pool = OpponentPool(
             (

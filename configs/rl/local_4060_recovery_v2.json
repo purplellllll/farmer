@@ -31,7 +31,9 @@
     "lr": 0.00001,
     "gamma": 0.999,
     "gae_lambda": 0.95,
-    "clip_param": 0.1
+    "clip_param": 0.1,
+    "terminal_score_coeff": 0.25,
+    "terminal_score_scale": 1000.0
   },
   "native": {
     "device": "cuda",

@@ -30,6 +30,8 @@ checkpoint 没有非有限参数，但最近 50 轮胜率为 0、平均分差约
   按仍有选择空间的槽归一化。
 - 终止状态 potential 强制为 0；中间 shaping 使用本人可见资产的保守清算代理，但
   telescoping 后不改变终局胜负目标。
+- 终局另外加入 `0.25*tanh(score_difference/1000)` 辅助项，使全败阶段仍能区分少输与
+  惨败；checkpoint 晋升依然只看真实胜率，不能靠分差辅助项绕过门槛。
 - 晋升同时要求历史快照窗口和 scripted 窗口过线。
 - recovery 阶段使用 144 step（6 天，足以完成 WHEAT/CARROT 生产周期），每轮固定
   2288 transition，约 16 局；学习率 `1e-5`、2 update epochs、clip `0.1`。
