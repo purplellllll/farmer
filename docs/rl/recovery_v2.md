@@ -37,6 +37,7 @@ checkpoint 没有非有限参数，但最近 50 轮胜率为 0、平均分差约
   2288 transition，约 16 局；学习率 `1e-5`、2 update epochs、clip `0.1`。
 - 候选生成把总 hand 数限制为 8，避免坍缩策略每回合继续雇工并把环境/候选计算拖慢；
   固定 16 个 hand 输出槽仍保留，因此模型和旧 BC 权重形状兼容。
+- recovery 阶段每轮保存 checkpoint，并保留最近 12 个，降低 Windows 重启造成的损失。
 
 启动命令：
 

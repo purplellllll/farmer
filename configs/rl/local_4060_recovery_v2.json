@@ -47,7 +47,7 @@
     "target_kl": 0.015,
     "scripted_opponent_probability": 0.75,
     "weight_decay": 0.01,
-    "checkpoint_interval": 5,
+    "checkpoint_interval": 1,
     "keep_checkpoints": 12
   },
   "self_play": {
