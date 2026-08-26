@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 
 
@@ -19,13 +21,26 @@ def expected_calibration_error(
     return float(error)
 
 
-def classification_metrics(y: np.ndarray, probabilities: np.ndarray) -> dict[str, float]:
-    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, log_loss
+def classification_metrics(y: np.ndarray, probabilities: np.ndarray) -> dict[str, Any]:
+    from sklearn.metrics import (
+        accuracy_score,
+        balanced_accuracy_score,
+        f1_score,
+        log_loss,
+        recall_score,
+    )
 
     labels = np.asarray(y, dtype=np.int64)
     p = np.clip(np.asarray(probabilities, dtype=np.float64), 1e-12, 1.0)
     predictions = p.argmax(axis=1)
     one_hot = np.eye(p.shape[1], dtype=np.float64)[labels]
+    recalls = recall_score(
+        labels,
+        predictions,
+        labels=np.arange(p.shape[1]),
+        average=None,
+        zero_division=0,
+    )
     return {
         "log_loss": float(log_loss(labels, p, labels=np.arange(p.shape[1]))),
         "accuracy": float(accuracy_score(labels, predictions)),
@@ -33,4 +48,8 @@ def classification_metrics(y: np.ndarray, probabilities: np.ndarray) -> dict[str
         "macro_f1": float(f1_score(labels, predictions, average="macro", zero_division=0)),
         "multiclass_brier": float(np.mean(np.sum((p - one_hot) ** 2, axis=1))),
         "ece_15": expected_calibration_error(labels, p, 15),
+        # The class-name mapping lives in the dataset/feature manifest.  Keeping
+        # the metric vector index-aligned makes it JSON-safe for arbitrary target
+        # dtypes while exposing rare-action failures hidden by aggregate scores.
+        "per_class_recall": [float(value) for value in recalls],
     }

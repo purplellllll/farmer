@@ -37,12 +37,19 @@ def parser() -> argparse.ArgumentParser:
     bc.add_argument("--batch-size", type=int, default=32)
     bc.add_argument("--device", default="cpu")
     bc.add_argument("--initial-checkpoint")
+    bc.add_argument("--validation-fraction", type=float, default=0.2)
+    bc.add_argument("--split-seed", type=int, default=20260826)
+    bc.add_argument("--max-train-examples", type=int)
+    bc.add_argument("--max-validation-examples", type=int)
+    bc.add_argument("--max-examples-per-group", type=int)
+    bc.add_argument("--record-sample-modulus", type=int, default=1)
+    bc.add_argument("--torch-threads", type=int)
     ppo = subparsers.add_parser("self-play", help="RLlib PPO with frozen checkpoint slots")
     ppo.add_argument("--config", required=True)
     ppo.add_argument("--iterations", type=int, required=True)
     ppo.add_argument("--bc-checkpoint")
     native = subparsers.add_parser(
-        "native-self-play", help="single-process CUDA PPO for Windows/local training"
+        "native-self-play", help="single-process CPU/CUDA PPO for Windows/local training"
     )
     native.add_argument("--config", required=True)
     native.add_argument("--iterations", type=int, required=True)
@@ -68,6 +75,13 @@ def main(argv: list[str] | None = None) -> int:
             device=args.device,
             batch_size=args.batch_size,
             initial_checkpoint=args.initial_checkpoint,
+            validation_fraction=args.validation_fraction,
+            split_seed=args.split_seed,
+            max_train_examples=args.max_train_examples,
+            max_validation_examples=args.max_validation_examples,
+            max_examples_per_group=args.max_examples_per_group,
+            record_sample_modulus=args.record_sample_modulus,
+            torch_threads=args.torch_threads,
         )
         print(json.dumps(result, ensure_ascii=False))
         return 0

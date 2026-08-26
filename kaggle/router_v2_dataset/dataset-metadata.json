@@ -1,0 +1,10 @@
+{
+  "title": "Farmer Kaggriculture Joint Router V2",
+  "id": "llllllc666/farmer-kaggriculture-joint-router-v2",
+  "licenses": [
+    {
+      "name": "CC0-1.0"
+    }
+  ],
+  "description": "Self-generated Kaggriculture 1.32.7 decision rows covering farmer, farm-hand, animal, logistics, expansion and ordered market action semantics. Episode and seed IDs are retained for leakage-safe group OOF."
+}

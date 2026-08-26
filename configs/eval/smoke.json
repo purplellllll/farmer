@@ -1,0 +1,12 @@
+{
+  "candidate": "builtin:starter",
+  "opponents": ["builtin:pass", "builtin:random"],
+  "seeds": [17],
+  "episode_steps": 48,
+  "swap_seats": true,
+  "policy_timeout_seconds": 1.0,
+  "max_policy_faults": 2,
+  "workers": 1,
+  "output_dir": "artifacts/eval/smoke",
+  "debug": false
+}

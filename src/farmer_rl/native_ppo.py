@@ -1,4 +1,4 @@
-"""Single-process CUDA PPO for local Kaggriculture self-play.
+"""Single-process CPU/CUDA PPO for local Kaggriculture self-play.
 
 This runner exists because Ray's worker bootstrap is unreliable with CUDA on
 some Windows laptops.  It intentionally reuses the exact tokenizer, legal
@@ -289,19 +289,28 @@ def run_native_self_play(
     """Run checkpointed single-process PPO and return compact iteration metrics."""
 
     torch = _torch()
-    if not torch.cuda.is_available():
-        raise RuntimeError("native PPO was requested for GPU training but CUDA is unavailable")
-    device = torch.device("cuda")
     training = dict(config.get("training", {}))
     native = dict(config.get("native", {}))
     self_play = dict(config.get("self_play", {}))
     model_config = ModelConfig.from_dict(dict(config.get("model", {})))
+    device_name = str(native.get("device", "cuda")).lower()
+    if device_name not in {"cpu", "cuda"}:
+        raise ValueError("native.device must be cpu or cuda")
+    if device_name == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("native PPO requested CUDA but CUDA is unavailable")
+    device = torch.device(device_name)
+    if device.type == "cpu":
+        cpu_threads = int(native.get("cpu_threads", 4))
+        if cpu_threads <= 0:
+            raise ValueError("native.cpu_threads must be positive")
+        torch.set_num_threads(cpu_threads)
     seed = int(native.get("seed", 20260825))
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cuda.matmul.allow_tf32 = True
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cuda.matmul.allow_tf32 = True
 
     model = build_actor_critic(model_config).to(device)
     opponent = build_actor_critic(model_config).to(device)
@@ -454,7 +463,8 @@ def run_native_self_play(
             "promoted": promoted,
             "mean_score_difference": float(np.mean(score_differences)),
             "pool_size": len(snapshots),
-            "cuda_peak_gib": torch.cuda.max_memory_allocated() / 2**30,
+            "device": device.type,
+            "cuda_peak_gib": torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0.0,
             "kl_early_stop": bool(update_metrics["kl"] > float(native.get("target_kl", 0.03))),
             **update_metrics,
         }
