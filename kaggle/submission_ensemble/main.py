@@ -28,6 +28,8 @@ import numpy as np
 
 _BUNDLE = None
 _LOAD_ATTEMPTED = False
+_PREDICT_CONFIRMED = False
+_PREDICT_ERROR_LOGGED = False
 
 _CROPS = ("WHEAT", "CARROT", "TOMATO", "STRAWBERRY", "MELON")
 _PRODUCTS = (
@@ -223,11 +225,18 @@ def _controller(observation: Mapping[str, Any], route: int | None) -> dict[str, 
 
 
 def agent(observation: Mapping[str, Any], configuration: Mapping[str, Any]) -> dict[str, Any]:
+    global _PREDICT_CONFIRMED, _PREDICT_ERROR_LOGGED
     route = None
     bundle = _get_bundle(configuration)
     if bundle is not None:
         try:
             route = int(bundle.predict(_features(observation)[None, :])[0])
+            if not _PREDICT_CONFIRMED:
+                print(f"ENSEMBLE_RUNTIME_OK models={len(bundle.base_models)} route={route}")
+                _PREDICT_CONFIRMED = True
         except Exception:
+            if not _PREDICT_ERROR_LOGGED:
+                traceback.print_exc()
+                _PREDICT_ERROR_LOGGED = True
             route = None
     return _controller(observation, route)
