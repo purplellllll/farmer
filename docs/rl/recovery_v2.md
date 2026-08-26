@@ -18,7 +18,8 @@ checkpoint 没有非有限参数，但最近 50 轮胜率为 0、平均分差约
 4. checkpoint 晋升只要求战胜历史快照；第一个晋升模型没有经过 scripted 基线门槛，
    因此策略池会接受只会利用旧弱模型、却不会经营农场的策略。
 5. 原 BC checkpoint 只有 5752 个同质示例；扩展课程短训又只抽到 261 个训练样本，
-   validation joint accuracy 为 0，不能单独承担强初始化。
+   validation joint accuracy 为 0。更关键的是 `DiverseCurriculumPolicy` 的设计目标是覆盖
+   25 类动作，而不是按胜率筛选专家轨迹；它适合训练动作语法，不能被当作强策略 teacher。
 
 ## recovery v2 修复
 
@@ -48,8 +49,11 @@ optimizer 和对手池。完成 144-step recovery 后，必须通过 720-step �
 
 CPU v2 的 24-step episode 只有一个游戏日，WHEAT/CARROT 最早也要第 2 天才有产出。
 因此买种子、建造和雇工在截断终局都只表现为现金损失，PASS 反而是短局最优响应。
-训练还只有每轮 3 局，BC 扩展短训的 261/56 条 train/validation 样本不足以改变原模型，
-所以第 15 轮仍对 scripted 为 0/31，最长 PASS streak 接近整局。
+直接对照也证实了这一点：同一 seed、交换席位后，官方 starter 在 24-step 两局均输给
+纯 PASS，平均分差 -40，恰好对应尚未回收的种子投入。
+训练还只有每轮 3 局，BC 扩展短训的 261/56 条 train/validation 样本不足以改变原模型；
+课程数据本身又以动作覆盖而非获胜质量为目标。所以第 15 轮仍对 scripted 为 0/31，最长
+PASS streak 接近整局。
 
 CPU 后续不应继续 24-step PPO。可选路径是：先扩大并修复 BC teacher，再在独占内存时
 使用至少 144 step；或者只让 CPU 负责离线 BC/评测，把在线 rollout 留给 GPU。
