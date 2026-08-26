@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import importlib.util
 import random
+import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
 from farmer_rl.actions import CandidateGenerator, JointActionCodec
+from farmer_rl.bc import _validation_group, iter_bc_records
 from farmer_rl.collector import collect_episode
 from farmer_rl.environment import KaggricultureEnv, pass_action
 from farmer_rl.errors import InvalidActionError, SeatSafetyError
@@ -163,6 +165,35 @@ class TrajectoryTests(unittest.TestCase):
         self.assertEqual({item.acting_seat for item in trajectory.transitions}, {0, 1})
 
 
+class BehaviourCloneDataTests(unittest.TestCase):
+    def test_minimal_curriculum_schema_and_group_split_are_seat_safe(self):
+        records = []
+        for seat in (0, 1):
+            records.append(
+                {
+                    "episode_id": "episode-shared",
+                    "step": 7,
+                    "acting_seat": seat,
+                    "observation": observation(seat, step=7),
+                    "action": pass_action(),
+                    "seed": 99,
+                }
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "curriculum.jsonl"
+            path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            loaded = list(iter_bc_records([path]))
+        self.assertEqual([item["acting_seat"] for item in loaded], [0, 1])
+        assignments = {
+            _validation_group(item, fraction=0.5, split_seed=1234)
+            for item in loaded
+        }
+        self.assertEqual(len(assignments), 1)
+
+
 class TokenAndActionTests(unittest.TestCase):
     def test_tokenizer_role_orders_own_farm_first(self):
         tokenizer = ObservationTokenizer(max_tokens=320)
@@ -199,6 +230,60 @@ class TokenAndActionTests(unittest.TestCase):
         action = codec.decode(obs, [0, *sell_indices])
         self.assertEqual(sum(order[2] for order in action["market"] if order[:2] == ["SELL", "WHEAT"]), 3)
 
+    def test_market_compiler_deduplicates_repeated_purchases(self):
+        obs = observation(0)
+        generator = CandidateGenerator(capacity=64)
+        codec = JointActionCodec(generator, max_hands=0, max_orders=10)
+        candidate_sets = codec.candidates(obs)
+        buy_indices = [
+            next(
+                i
+                for i, item in enumerate(candidate_set.candidates)
+                if item.action == ("BUY_SEED", "WHEAT", 1)
+            )
+            for candidate_set in candidate_sets[-10:]
+        ]
+        action = codec.decode(obs, [0, *buy_indices])
+        self.assertEqual(action["market"], [["BUY_SEED", "WHEAT", 1]])
+
+    def test_prefix_conditioned_selection_masks_duplicate_market_orders(self):
+        obs = observation(0)
+        codec = JointActionCodec(CandidateGenerator(capacity=64), max_hands=0, max_orders=3)
+
+        def chooser(_slot_index, candidate_set, valid_mask):
+            for index, candidate in enumerate(candidate_set.candidates):
+                if candidate.action == ("BUY_SEED", "WHEAT", 1) and valid_mask[index]:
+                    return index
+            return 0
+
+        indices, masks = codec.select(obs, chooser)
+        action = codec.decode(obs, indices)
+        rows = [masks[index * 64 : (index + 1) * 64] for index in range(codec.slots)]
+        repeated_buy_index = next(
+            index
+            for index, candidate in enumerate(codec.candidates(obs)[-2].candidates)
+            if candidate.action == ("BUY_SEED", "WHEAT", 1)
+        )
+        self.assertEqual(action["market"], [["BUY_SEED", "WHEAT", 1]])
+        self.assertEqual(rows[-2][repeated_buy_index], 0)
+        self.assertEqual(sum(rows[-1]), 1)
+
+    def test_prefix_conditioned_selection_reserves_shared_seeds(self):
+        obs = observation(0, hands=3)
+        obs["farms"][0]["hands"] = [[1, 0], [2, 0], [3, 0]]
+        codec = JointActionCodec(CandidateGenerator(capacity=64), max_hands=3, max_orders=1)
+
+        def chooser(_slot_index, candidate_set, valid_mask):
+            for index, candidate in enumerate(candidate_set.candidates):
+                if candidate.action == ("PLANT", "WHEAT") and valid_mask[index]:
+                    return index
+            return 0
+
+        indices, _ = codec.select(obs, chooser)
+        action = codec.decode(obs, indices)
+        self.assertEqual(action["hands"][:2], [["PLANT", "WHEAT"], ["PLANT", "WHEAT"]])
+        self.assertEqual(action["hands"][2], ["PASS"])
+
 
 class OpponentAndConfigTests(unittest.TestCase):
     def test_pfsp_prefers_near_even_opponent(self):
@@ -219,6 +304,9 @@ class OpponentAndConfigTests(unittest.TestCase):
         for filename in (
             "ppo.json",
             "local_4060.json",
+            "local_4060_recovery_v2.json",
+            "cpu_v2.json",
+            "cpu_v2_smoke.json",
             "population.json",
             "data_manifest.schema.json",
             "data_manifest.example.json",

@@ -1,0 +1,16 @@
+{
+  "id": "llllllc666/farmer-eight-model-ensemble-v4",
+  "title": "Farmer Eight Model Ensemble V4",
+  "code_file": "ensemble_train.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "llllllc666/farmer-kaggriculture-joint-router-v2"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

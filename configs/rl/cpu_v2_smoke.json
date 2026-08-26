@@ -1,0 +1,62 @@
+{
+  "schema_version": "farmer-rl-training/v2",
+  "environment": {
+    "configuration": {
+      "episodeSteps": 24
+    },
+    "debug": false
+  },
+  "actions": {
+    "max_hands": 16,
+    "max_orders": 10,
+    "candidate_capacity": 64,
+    "market_decoder": "sequential_resource_compiler_v2"
+  },
+  "model": {
+    "feature_dim": 32,
+    "max_tokens": 320,
+    "slots": 27,
+    "candidate_capacity": 64,
+    "d_model": 256,
+    "nhead": 8,
+    "layers": 8,
+    "dim_feedforward": 1024,
+    "dropout": 0.1
+  },
+  "bc": {
+    "lr": 0.00003,
+    "validation_fraction": 0.2,
+    "split_unit": "episode_id+seed"
+  },
+  "training": {
+    "lr": 0.00001,
+    "gamma": 0.999,
+    "gae_lambda": 0.95,
+    "clip_param": 0.15
+  },
+  "native": {
+    "device": "cpu",
+    "cpu_threads": 4,
+    "seed": 20260826,
+    "train_batch_steps": 48,
+    "minibatch_size": 16,
+    "update_epochs": 1,
+    "entropy_coeff": 0.0005,
+    "value_coeff": 0.5,
+    "grad_clip": 0.5,
+    "target_kl": 0.015,
+    "scripted_opponent_probability": 1.0,
+    "weight_decay": 0.01,
+    "checkpoint_interval": 1,
+    "keep_checkpoints": 2
+  },
+  "self_play": {
+    "checkpoint_slots": 2,
+    "promotion_interval": 2,
+    "promotion_min_games": 2,
+    "promotion_win_rate": 0.55,
+    "pfsp_power": 1.0,
+    "seat_swap": true,
+    "selection_metric": "paired_seed_win_rate"
+  }
+}

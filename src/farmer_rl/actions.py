@@ -9,7 +9,7 @@ omitting a legal action is safer than labelling an illegal one as legal.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .environment import Action
 from .errors import InvalidActionError, SeatSafetyError
@@ -167,6 +167,15 @@ class CandidateGenerator:
                 result.append(ActionCandidate(slot, ("DROP",), "unit is shed-adjacent and carries inventory"))
             for item in self._positive_items(shed):
                 result.append(ActionCandidate(slot, ("PICKUP", item, 1), "shed contains item"))
+                quantity = min(int(shed.get(item, 0) or 0), 6)
+                if quantity > 1:
+                    result.append(
+                        ActionCandidate(
+                            slot,
+                            ("PICKUP", item, quantity),
+                            "bounded curriculum pickup does not exceed current shed stock",
+                        )
+                    )
 
         candidates = self._dedupe(result)
         return CandidateSet(slot, candidates[: self.capacity], self.capacity)
@@ -209,6 +218,39 @@ class CandidateGenerator:
         land_costs = (1000, 2000, 4000)
         if len(quadrants) < 4 and money >= land_costs[min(next_land_index, 2)]:
             result.append(ActionCandidate(slot, ("BUY_LAND",), "locked quadrant remains and current cash covers base cost"))
+        # Keep the original candidates above in their historical order so old
+        # BC checkpoints remain a useful warm start.  Curriculum-v2 uses a
+        # deliberately wider but still bounded set of purchase quantities.
+        # These candidates are appended rather than inserted for that reason.
+        for crop in CROPS:
+            quantity = 3
+            if money >= SEED_COSTS[crop] * quantity:
+                result.append(
+                    ActionCandidate(
+                        slot,
+                        ("BUY_SEED", crop, quantity),
+                        "curriculum quantity is affordable at its fixed unit cost",
+                    )
+                )
+        market = observation.get("market", {}) or {}
+        market_inventory = market.get("inventory", {}) or {}
+        market_prices = market.get("prices", {}) or {}
+        shed_used = sum(max(0, int(value or 0)) for value in shed.values())
+        # The official engine permits BUY_PRODUCT only for WHEAT and
+        # FERTILIZER.  Quantity four is the curriculum-v2 expert action.  A
+        # public-price reserve is rechecked by the sequential compiler below.
+        for item in ("WHEAT", "FERTILIZER"):
+            for quantity in (1, 4):
+                price = max(1, int(market_prices.get(item, 0) or 0))
+                supply = max(0, int(market_inventory.get(item, 0) or 0))
+                if shed_used + quantity <= 100 and supply >= quantity and money >= price * quantity:
+                    result.append(
+                        ActionCandidate(
+                            slot,
+                            ("BUY_PRODUCT", item, quantity),
+                            "curriculum quantity fits public supply, shed and current-price budget",
+                        )
+                    )
         candidates = self._dedupe(result)
         return CandidateSet(slot, candidates[: self.capacity], self.capacity)
 
@@ -247,6 +289,164 @@ class JointActionCodec:
     def mask(self, observation: Mapping[str, Any]) -> tuple[int, ...]:
         return tuple(value for candidate_set in self.candidates(observation) for value in candidate_set.mask)
 
+    def select(
+        self,
+        observation: Mapping[str, Any],
+        chooser: Callable[[int, CandidateSet, tuple[int, ...]], int],
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Choose a canonical joint action with prefix-conditioned masks.
+
+        The policy still scores all fixed output slots in one Transformer
+        forward pass, but later slots may only select actions that remain
+        executable after earlier selections reserve shared seeds, shed stock,
+        cash, market inventory and queue semantics.  Returning the exact masks
+        used by the chooser lets PPO recompute the same conditional likelihood
+        during its update instead of assigning credit to actions discarded by
+        :meth:`decode`.
+        """
+
+        sets = self.candidates(observation)
+        _, farm, private = self.generator._own_parts(observation)
+        active_hands = len(farm.get("hands", []) or [])
+        unit_slot_count = 1 + self.max_hands
+        available = {
+            str(key): max(0, int(value or 0))
+            for key, value in (private.get("shed", {}) or {}).items()
+        }
+        seeds = {
+            str(key): max(0, int(value or 0))
+            for key, value in (private.get("seeds", {}) or {}).items()
+        }
+        selected: list[int] = []
+        masks: list[tuple[int, ...]] = []
+
+        def choose(slot_index: int, candidate_set: CandidateSet, row: list[int]) -> int:
+            row_tuple = tuple(int(value) for value in row)
+            index = int(chooser(slot_index, candidate_set, row_tuple))
+            if index < 0 or index >= candidate_set.capacity or not row_tuple[index]:
+                raise InvalidActionError(
+                    f"chooser selected masked index {index} for {candidate_set.slot}"
+                )
+            selected.append(index)
+            masks.append(row_tuple)
+            return index
+
+        unit_actions: list[tuple[Any, ...]] = []
+        for slot_index, candidate_set in enumerate(sets[:unit_slot_count]):
+            row = list(candidate_set.mask)
+            if slot_index <= active_hands:
+                for candidate_index, candidate in enumerate(candidate_set.candidates):
+                    action = candidate.action
+                    if action[0] == "PLANT" and seeds.get(str(action[1]), 0) <= 0:
+                        row[candidate_index] = 0
+                    elif action[0] == "PICKUP":
+                        item = str(action[1])
+                        requested = int(action[2]) if len(action) >= 3 else 1
+                        if requested <= 0 or requested > available.get(item, 0):
+                            row[candidate_index] = 0
+            index = choose(slot_index, candidate_set, row)
+            action = candidate_set.candidates[index].action
+            unit_actions.append(action)
+            if action[0] == "PLANT":
+                crop = str(action[1])
+                seeds[crop] = seeds.get(crop, 0) - 1
+            elif action[0] == "PICKUP":
+                item = str(action[1])
+                requested = int(action[2]) if len(action) >= 3 else 1
+                available[item] = available.get(item, 0) - requested
+
+        budget = int(farm.get("money", 0) or 0)
+        hires_today = int(farm.get("hires_today", 0) or 0)
+        unlocked = len(farm.get("unlocked_quadrants", []) or ["NW"])
+        public_market = observation.get("market", {}) or {}
+        market_inventory = {
+            str(key): max(0, int(value or 0))
+            for key, value in (public_market.get("inventory", {}) or {}).items()
+        }
+        market_prices = {
+            str(key): max(1, int(value or 0))
+            for key, value in (public_market.get("prices", {}) or {}).items()
+        }
+        inventories = private.get("inventories", []) or []
+        pending_drop = 0
+        for unit_index, action in enumerate(unit_actions[: 1 + active_hands]):
+            if action[0] == "DROP" and unit_index < len(inventories):
+                carried = inventories[unit_index]
+                if isinstance(carried, Mapping):
+                    pending_drop += sum(max(0, int(value or 0)) for value in carried.values())
+        shed_room = max(0, 100 - sum(available.values()) - pending_drop)
+        seen_orders: set[tuple[Any, ...]] = set()
+        market_open = True
+
+        for slot_index, candidate_set in enumerate(sets[unit_slot_count:], start=unit_slot_count):
+            row = [0] * candidate_set.capacity
+            row[0] = 1
+            if market_open:
+                for candidate_index, candidate in enumerate(candidate_set.candidates[1:], start=1):
+                    action = candidate.action
+                    op = str(action[0])
+                    semantic_key = (op, str(action[1])) if len(action) >= 2 else (op,)
+                    valid = semantic_key not in seen_orders
+                    if op == "SELL":
+                        valid = valid and int(action[2]) <= available.get(str(action[1]), 0)
+                    elif op == "BUY_SEED":
+                        valid = valid and SEED_COSTS[str(action[1])] * int(action[2]) <= budget
+                    elif op == "BUY_ANIMAL":
+                        quantity = int(action[2])
+                        valid = (
+                            valid
+                            and ANIMAL_COSTS[str(action[1])] * quantity <= budget
+                            and quantity <= shed_room
+                        )
+                    elif op == "BUY_PRODUCT":
+                        item, quantity = str(action[1]), int(action[2])
+                        valid = (
+                            valid
+                            and item in {"WHEAT", "FERTILIZER"}
+                            and quantity <= shed_room
+                            and quantity <= market_inventory.get(item, 0)
+                            and market_prices.get(item, 1) * quantity <= budget
+                        )
+                    elif op == "HIRE":
+                        valid = valid and self.generator._fib(hires_today) <= budget
+                    elif op == "BUY_LAND":
+                        cost = (1000, 2000, 4000)[min(max(0, unlocked - 1), 2)]
+                        valid = valid and unlocked < 4 and cost <= budget
+                    else:
+                        valid = False
+                    row[candidate_index] = int(valid)
+
+            index = choose(slot_index, candidate_set, row)
+            action = candidate_set.candidates[index].action
+            if index == 0:
+                market_open = False
+                continue
+            op = str(action[0])
+            semantic_key = (op, str(action[1])) if len(action) >= 2 else (op,)
+            seen_orders.add(semantic_key)
+            if op == "SELL":
+                item, quantity = str(action[1]), int(action[2])
+                available[item] = available.get(item, 0) - quantity
+            elif op == "BUY_SEED":
+                budget -= SEED_COSTS[str(action[1])] * int(action[2])
+            elif op == "BUY_ANIMAL":
+                quantity = int(action[2])
+                budget -= ANIMAL_COSTS[str(action[1])] * quantity
+                shed_room -= quantity
+            elif op == "BUY_PRODUCT":
+                item, quantity = str(action[1]), int(action[2])
+                budget -= market_prices.get(item, 1) * quantity
+                shed_room -= quantity
+                market_inventory[item] = market_inventory.get(item, 0) - quantity
+            elif op == "HIRE":
+                budget -= self.generator._fib(hires_today)
+                hires_today += 1
+            elif op == "BUY_LAND":
+                budget -= (1000, 2000, 4000)[min(max(0, unlocked - 1), 2)]
+                unlocked += 1
+
+        return tuple(selected), tuple(value for row in masks for value in row)
+
     def decode(self, observation: Mapping[str, Any], indices: Sequence[int]) -> Action:
         sets = self.candidates(observation)
         if len(indices) != len(sets):
@@ -264,12 +464,51 @@ class JointActionCodec:
         # opponent changes realized prices; this deliberately errs on safety.
         _, farm, private = self.generator._own_parts(observation)
         available = {str(key): int(value or 0) for key, value in (private.get("shed", {}) or {}).items()}
+        unit_actions = [list(action) for action in chosen[: 1 + active_hands]]
+        for index, action in enumerate(unit_actions):
+            if action and action[0] == "PICKUP" and len(action) >= 3:
+                item, requested = str(action[1]), int(action[2])
+                quantity = min(requested, available.get(item, 0))
+                if quantity <= 0:
+                    unit_actions[index] = ["PASS"]
+                    continue
+                unit_actions[index] = ["PICKUP", item, quantity]
+                available[item] = available.get(item, 0) - quantity
         budget = int(farm.get("money", 0) or 0)
         hires_today = int(farm.get("hires_today", 0) or 0)
         unlocked = len(farm.get("unlocked_quadrants", []) or ["NW"])
+        public_market = observation.get("market", {}) or {}
+        market_inventory = {
+            str(key): int(value or 0)
+            for key, value in (public_market.get("inventory", {}) or {}).items()
+        }
+        market_prices = {
+            str(key): max(1, int(value or 0))
+            for key, value in (public_market.get("prices", {}) or {}).items()
+        }
+        inventories = private.get("inventories", []) or []
+        pending_drop = 0
+        for unit_index, action in enumerate(unit_actions):
+            if action and action[0] == "DROP" and unit_index < len(inventories):
+                carried = inventories[unit_index]
+                if isinstance(carried, Mapping):
+                    pending_drop += sum(max(0, int(value or 0)) for value in carried.values())
+        shed_room = max(
+            0,
+            100 - sum(max(0, value) for value in available.values()) - pending_drop,
+        )
+        # A joint action is compiled in order.  Candidate slots are scored
+        # independently, but duplicate semantic orders are never emitted and
+        # every accepted order reserves its shared resources for later slots.
+        # This prevents the old ten-identical-BUY_SEED collapse even when all
+        # market heads choose the same candidate index.
+        seen_orders: set[tuple[Any, ...]] = set()
         market: list[list[Any]] = []
         for action in proposed_market:
             op = action[0]
+            semantic_key = (op, str(action[1])) if len(action) >= 2 else (op,)
+            if semantic_key in seen_orders:
+                continue
             if op == "SELL":
                 item, requested = str(action[1]), int(action[2])
                 quantity = min(requested, available.get(item, 0))
@@ -277,31 +516,56 @@ class JointActionCodec:
                     continue
                 available[item] = available.get(item, 0) - quantity
                 market.append(["SELL", item, quantity])
+                seen_orders.add(semantic_key)
             elif op == "BUY_SEED":
                 cost = SEED_COSTS[str(action[1])] * int(action[2])
                 if cost <= budget:
                     budget -= cost
                     market.append(action)
+                    seen_orders.add(semantic_key)
             elif op == "BUY_ANIMAL":
                 cost = ANIMAL_COSTS[str(action[1])] * int(action[2])
-                if cost <= budget:
+                quantity = int(action[2])
+                if cost <= budget and quantity <= shed_room:
                     budget -= cost
+                    shed_room -= quantity
                     market.append(action)
+                    seen_orders.add(semantic_key)
+            elif op == "BUY_PRODUCT":
+                item, quantity = str(action[1]), int(action[2])
+                # Reserve the visible quote for every unit.  The official
+                # engine requotes after each unit and still performs its own
+                # final affordability check; this compiler never relies on
+                # same-turn sale proceeds.
+                cost = market_prices.get(item, 1) * quantity
+                if (
+                    item in {"WHEAT", "FERTILIZER"}
+                    and quantity <= shed_room
+                    and quantity <= market_inventory.get(item, 0)
+                    and cost <= budget
+                ):
+                    budget -= cost
+                    shed_room -= quantity
+                    market_inventory[item] -= quantity
+                    market.append(action)
+                    seen_orders.add(semantic_key)
             elif op == "HIRE":
                 cost = self.generator._fib(hires_today)
                 if cost <= budget:
                     budget -= cost
                     hires_today += 1
                     market.append(action)
+                    seen_orders.add(semantic_key)
             elif op == "BUY_LAND" and unlocked < 4:
                 cost = (1000, 2000, 4000)[min(unlocked - 1, 2)]
                 if cost <= budget:
                     budget -= cost
                     unlocked += 1
                     market.append(action)
+                    seen_orders.add(semantic_key)
         return {
-            "farmer": chosen[0],
-            "hands": chosen[1 : 1 + active_hands],
+            "farmer": unit_actions[0],
+            "hands": unit_actions[1:],
             "market": market,
         }
 

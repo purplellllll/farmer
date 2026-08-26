@@ -1,0 +1,92 @@
+{
+  "schema_version": "farmer-cpu-rl-results/v1",
+  "captured_at": "2026-08-26T20:16:00+08:00",
+  "source_data": {
+    "path": "artifacts/ensemble-retrain-v2/data/curriculum_v2.jsonl",
+    "sha256": "c02957b2106db86b320ebd45a939560aaa1d47484f6aea0e4c0f47e40cc06d4f",
+    "records": 28760,
+    "encodable_after_v2_codec": 28760,
+    "episode_seed_groups": 20
+  },
+  "old_gpu_run_audit": {
+    "artifact": "artifacts/cpu-rl-v2/diagnostics/gpu_run_audit.json",
+    "metrics_iterations_at_audit": 1223,
+    "recent_window": 100,
+    "recent_mean_win_rate": 0.0,
+    "recent_mean_score_difference": -3334.3675,
+    "promotions": 1,
+    "last_nonzero_win_iteration": 37,
+    "checkpoint_non_finite_parameters": 0,
+    "duplicate_market_order_rate": 0.9,
+    "max_idle_pass_streak": 19
+  },
+  "bc_short": {
+    "path": "artifacts/cpu-rl-v2/bc/curriculum_v2_short.pt",
+    "sha256": "41044f91be525929f0d67295066c07c4d816daaab8552b3a2a780d639e55ea2b",
+    "initial_checkpoint": "checkpoints/starter_bc_v5.pt",
+    "epochs": 1,
+    "train_examples": 261,
+    "validation_examples": 56,
+    "train_groups": 17,
+    "validation_groups": 3,
+    "group_overlap": 0,
+    "skipped": 0,
+    "validation_loss": 21.750590793600704,
+    "validation_slot_accuracy": 0.3818797713731104,
+    "validation_joint_accuracy": 0.0
+  },
+  "ppo_smoke": {
+    "checkpoint": "artifacts/cpu-rl-v2/smoke-self-play/checkpoints/iteration_000001.pt",
+    "sha256": "97757fda6ae315b6d38fe87d9b941839180445dccc28e3715a08480b63afb646",
+    "iterations_completed": 1,
+    "steps": 69,
+    "games": 3,
+    "seconds": 29.961394200014183,
+    "steps_per_second": 2.3029635917265603,
+    "learner_win_rate": 0.0,
+    "mean_score_difference": -501.6666666666667,
+    "non_finite_or_oom": false
+  },
+  "local_benchmark": {
+    "artifact": "artifacts/eval/cpu-rl-v2-smoke/benchmark.json",
+    "protocol": "one holdout seed, pass+starter, both seats, 24 steps",
+    "games": 4,
+    "wins": 0,
+    "draws": 0,
+    "losses": 4,
+    "mean_score_difference": -60.0,
+    "duplicate_market_orders": 0,
+    "resource_conflict_orders": 0,
+    "overbudget_orders": 0,
+    "max_idle_pass_streak": 19,
+    "latency_p50_ms": 75.81485000264365,
+    "latency_p95_ms": 85.98932000022616,
+    "policy_crash_rate": 0.0,
+    "engine_failure_rate": 0.0
+  },
+  "long_cpu_run": {
+    "path": "artifacts/cpu-rl-v2/self-play-24",
+    "status_at_capture": "running",
+    "target_iterations": 50,
+    "iterations_completed_at_capture": 3,
+    "launcher_pid_at_capture": 30560,
+    "worker_pid_at_capture": 28632,
+    "cpu_threads": 4,
+    "priority": "BelowNormal",
+    "episode_steps": 24,
+    "games_completed_at_capture": 9,
+    "learner_win_rate_at_capture": 0.1111111111111111,
+    "scripted_record_at_capture": "0/7",
+    "snapshot_record_at_capture": "1/2",
+    "mean_score_difference_at_capture": -434.5555555555556,
+    "mean_iteration_seconds_at_capture": 37.67586613332969,
+    "estimated_remaining_hours_at_capture": 0.4918793634073599,
+    "peak_private_gib_observed": 4.43,
+    "memory_guard": {
+      "episode_720": "Reached one 1438-step iteration, then stopped after private memory reached 7.31 GiB and system free memory fell to 0.66 GiB.",
+      "episode_144": "Reached iteration 14; resume was stopped before iteration 15 after private memory reached 7.7 GiB and system free memory fell to 0.49 GiB.",
+      "gpu_process_preserved": true
+    },
+    "note": "PID, progress and ETA are capture-time evidence, not a completed-training claim. Check process.json, metrics.jsonl and latest.json for live state."
+  }
+}

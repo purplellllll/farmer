@@ -1,4 +1,4 @@
-"""Single-process CUDA PPO for local Kaggriculture self-play.
+"""Single-process CPU/CUDA PPO for local Kaggriculture self-play.
 
 This runner exists because Ray's worker bootstrap is unreliable with CUDA on
 some Windows laptops.  It intentionally reuses the exact tokenizer, legal
@@ -17,7 +17,7 @@ from typing import Any, Callable, Mapping
 
 import numpy as np
 
-from .actions import CandidateGenerator, JointActionCodec
+from .actions import ANIMAL_COSTS, SEED_COSTS, CandidateGenerator, JointActionCodec
 from .environment import KaggricultureEnv, validate_action
 from .model import ModelConfig, build_actor_critic
 from .tokenizer import ObservationTokenizer
@@ -48,8 +48,10 @@ def _sample(
     encoded: Mapping[str, np.ndarray],
     *,
     device: Any,
+    observation: Mapping[str, Any] | None = None,
+    codec: JointActionCodec | None = None,
     deterministic: bool = False,
-) -> tuple[np.ndarray, float, float]:
+) -> tuple[np.ndarray, float, float, np.ndarray, np.ndarray]:
     torch = _torch()
     with torch.inference_mode(), torch.autocast(
         device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"
@@ -60,29 +62,70 @@ def _sample(
             torch.as_tensor(encoded["attention"], device=device).unsqueeze(0),
             torch.as_tensor(encoded["action_mask"], device=device).unsqueeze(0),
         )
+    if observation is not None and codec is not None:
+        def chooser(slot_index: int, _candidate_set: Any, mask: tuple[int, ...]) -> int:
+            row_mask = torch.as_tensor(mask, dtype=torch.bool, device=device)
+            row_logits = logits[0, slot_index].float().masked_fill(
+                ~row_mask, torch.finfo(torch.float32).min
+            )
+            if deterministic:
+                return int(row_logits.argmax().item())
+            return int(torch.distributions.Categorical(logits=row_logits).sample().item())
+
+        selected, dynamic_mask_flat = codec.select(observation, chooser)
+        actions = torch.as_tensor(selected, dtype=torch.long, device=device).unsqueeze(0)
+        dynamic_mask = torch.as_tensor(
+            dynamic_mask_flat, dtype=torch.bool, device=device
+        ).reshape(1, codec.slots, codec.generator.capacity)
+        logits = logits.float().masked_fill(~dynamic_mask, torch.finfo(torch.float32).min)
+        action_mask = dynamic_mask.squeeze(0).cpu().numpy().astype(np.bool_)
+    else:
+        actions = logits.argmax(dim=-1) if deterministic else torch.distributions.Categorical(
+            logits=logits.float()
+        ).sample()
+        action_mask = np.asarray(encoded["action_mask"], dtype=np.bool_).reshape(
+            actions.shape[-1], -1
+        )
     distribution = torch.distributions.Categorical(logits=logits.float())
-    actions = logits.argmax(dim=-1) if deterministic else distribution.sample()
-    log_probability = distribution.log_prob(actions).sum(dim=-1)
+    policy_slot_mask = torch.as_tensor(
+        action_mask.sum(axis=-1) > 1, dtype=torch.float32, device=device
+    ).unsqueeze(0)
+    normalizer = policy_slot_mask.sum(dim=-1).clamp_min(1.0)
+    log_probability = (
+        distribution.log_prob(actions) * policy_slot_mask
+    ).sum(dim=-1) / normalizer
     return (
         actions.squeeze(0).cpu().numpy().astype(np.int64),
         float(log_probability.item()),
         float(value.item()),
+        action_mask.reshape(-1),
+        policy_slot_mask.squeeze(0).cpu().numpy().astype(np.float32),
     )
 
 
-def _money_difference(observation: Mapping[str, Any], learner_seat: int) -> float:
+def _potential(observation: Mapping[str, Any], learner_seat: int) -> float:
+    """Bounded public/own-private liquidation proxy used only for shaping."""
+
     farms = observation.get("farms", [])
     if not isinstance(farms, list) or len(farms) != 2:
         return 0.0
-    own = float(farms[learner_seat].get("money", 0.0) or 0.0)
-    other = float(farms[1 - learner_seat].get("money", 0.0) or 0.0)
-    return own - other
-
-
-def _potential(observation: Mapping[str, Any], learner_seat: int) -> float:
-    # Bounded potential-based shaping improves the otherwise terminal-only
-    # signal without changing the optimal policy under the configured gamma.
-    return math.tanh(_money_difference(observation, learner_seat) / 10_000.0)
+    own = farms[learner_seat]
+    private = observation.get("private", {}) or {}
+    market_prices = ((observation.get("market", {}) or {}).get("prices", {}) or {})
+    value = float(own.get("money", 0.0) or 0.0)
+    for crop, count in (private.get("seeds", {}) or {}).items():
+        value += SEED_COSTS.get(str(crop), 0) * max(0, int(count or 0))
+    inventories = [private.get("shed", {}) or {}, *(private.get("inventories", []) or [])]
+    for inventory in inventories:
+        if not isinstance(inventory, Mapping):
+            continue
+        for item, count in inventory.items():
+            unit_value = ANIMAL_COSTS.get(
+                str(item), max(0, int(market_prices.get(str(item), 0) or 0))
+            )
+            value += unit_value * max(0, int(count or 0))
+    opponent_money = float(farms[1 - learner_seat].get("money", 0.0) or 0.0)
+    return math.tanh((value - opponent_money) / 10_000.0)
 
 
 def _cpu_state_dict(model: Any) -> dict[str, Any]:
@@ -127,14 +170,25 @@ def _collect_episode(
         opponent.eval()
     for _ in range(episode_steps):
         learner_encoded = _encoded(observations[learner_seat], tokenizer, codec)
-        learner_indices, log_probability, value = _sample(
-            learner, learner_encoded, device=device
+        learner_indices, log_probability, value, learner_mask, policy_slot_mask = _sample(
+            learner,
+            learner_encoded,
+            device=device,
+            observation=observations[learner_seat],
+            codec=codec,
         )
+        learner_encoded["action_mask"] = learner_mask
         if opponent_policy is None:
             if opponent is None:
                 raise ValueError("model or scripted opponent is required")
             opponent_encoded = _encoded(observations[1 - learner_seat], tokenizer, codec)
-            opponent_indices, _, _ = _sample(opponent, opponent_encoded, device=device)
+            opponent_indices, _, _, _, _ = _sample(
+                opponent,
+                opponent_encoded,
+                device=device,
+                observation=observations[1 - learner_seat],
+                codec=codec,
+            )
             opponent_action = codec.decode(
                 observations[1 - learner_seat], opponent_indices
             )
@@ -150,18 +204,28 @@ def _collect_episode(
             1 - learner_seat: opponent_action,
         }
         result = env.step(actions)
+        done = result.terminated or result.truncated
         current_potential = _potential(observations[learner_seat], learner_seat)
-        next_potential = _potential(result.observations[learner_seat], learner_seat)
+        # A zero terminal potential makes the shaping telescope to a policy-
+        # independent constant.  The old non-zero terminal potential changed
+        # the objective into final cash difference and rewarded PASS-heavy
+        # policies that avoided productive investment.
+        next_potential = (
+            0.0
+            if done
+            else _potential(result.observations[learner_seat], learner_seat)
+        )
         reward = gamma * next_potential - current_potential
         final_rewards = result.rewards
         records.append(
             {
                 **learner_encoded,
                 "actions": learner_indices,
+                "policy_slot_mask": policy_slot_mask,
                 "old_log_probability": log_probability,
                 "old_value": value,
                 "reward": reward,
-                "done": result.terminated or result.truncated,
+                "done": done,
             }
         )
         observations = result.observations
@@ -196,7 +260,7 @@ def _collect_episode(
 def _stack(records: list[dict[str, Any]]) -> dict[str, Any]:
     torch = _torch()
     result: dict[str, Any] = {}
-    for key in ("tokens", "types", "attention", "action_mask", "actions"):
+    for key in ("tokens", "types", "attention", "action_mask", "actions", "policy_slot_mask"):
         result[key] = torch.from_numpy(np.stack([item[key] for item in records]))
     for key in ("old_log_probability", "old_value", "advantage", "return"):
         result[key] = torch.tensor([item[key] for item in records], dtype=torch.float32)
@@ -244,13 +308,19 @@ def _update(
                     tensors["action_mask"],
                 )
                 distribution = torch.distributions.Categorical(logits=logits.float())
-                log_probability = distribution.log_prob(tensors["actions"]).sum(dim=-1)
+                policy_slot_mask = tensors["policy_slot_mask"].float()
+                normalizer = policy_slot_mask.sum(dim=-1).clamp_min(1.0)
+                log_probability = (
+                    distribution.log_prob(tensors["actions"]) * policy_slot_mask
+                ).sum(dim=-1) / normalizer
                 ratio = (log_probability - tensors["old_log_probability"]).exp()
                 unclipped = ratio * tensors["advantage"]
                 clipped = ratio.clamp(1.0 - clip_param, 1.0 + clip_param) * tensors["advantage"]
                 policy_loss = -torch.minimum(unclipped, clipped).mean()
                 value_loss = 0.5 * (values.float() - tensors["return"]).square().mean()
-                entropy = distribution.entropy().sum(dim=-1).mean()
+                entropy = (
+                    (distribution.entropy() * policy_slot_mask).sum(dim=-1) / normalizer
+                ).mean()
                 loss = policy_loss + value_coeff * value_loss - entropy_coeff * entropy
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -289,19 +359,28 @@ def run_native_self_play(
     """Run checkpointed single-process PPO and return compact iteration metrics."""
 
     torch = _torch()
-    if not torch.cuda.is_available():
-        raise RuntimeError("native PPO was requested for GPU training but CUDA is unavailable")
-    device = torch.device("cuda")
     training = dict(config.get("training", {}))
     native = dict(config.get("native", {}))
     self_play = dict(config.get("self_play", {}))
     model_config = ModelConfig.from_dict(dict(config.get("model", {})))
+    device_name = str(native.get("device", "cuda")).lower()
+    if device_name not in {"cpu", "cuda"}:
+        raise ValueError("native.device must be cpu or cuda")
+    if device_name == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("native PPO requested CUDA but CUDA is unavailable")
+    device = torch.device(device_name)
+    if device.type == "cpu":
+        cpu_threads = int(native.get("cpu_threads", 4))
+        if cpu_threads <= 0:
+            raise ValueError("native.cpu_threads must be positive")
+        torch.set_num_threads(cpu_threads)
     seed = int(native.get("seed", 20260825))
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cuda.matmul.allow_tf32 = True
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cuda.matmul.allow_tf32 = True
 
     model = build_actor_critic(model_config).to(device)
     opponent = build_actor_critic(model_config).to(device)
@@ -313,6 +392,7 @@ def run_native_self_play(
     snapshots = [_cpu_state_dict(model)]
     snapshot_stats: list[dict[str, float]] = [{"games": 0.0, "wins": 0.0}]
     promotion_outcomes: list[float] = []
+    scripted_promotion_outcomes: list[float] = []
     start_iteration = 0
     if resume:
         payload = torch.load(resume, map_location="cpu", weights_only=False)
@@ -323,6 +403,9 @@ def run_native_self_play(
         snapshots = payload.get("snapshots", snapshots)
         snapshot_stats = payload.get("snapshot_stats", snapshot_stats)
         promotion_outcomes = [float(value) for value in payload.get("promotion_outcomes", [])]
+        scripted_promotion_outcomes = [
+            float(value) for value in payload.get("scripted_promotion_outcomes", [])
+        ]
         start_iteration = int(payload.get("iteration", 0))
     elif bc_checkpoint:
         payload = torch.load(bc_checkpoint, map_location="cpu", weights_only=False)
@@ -395,6 +478,7 @@ def run_native_self_play(
             score_differences.append(float(episode_metrics["score_difference"]))
             if use_scripted:
                 scripted_outcomes.append(outcome)
+                scripted_promotion_outcomes.append(outcome)
             else:
                 assert snapshot_index is not None
                 snapshot_outcomes.append(outcome)
@@ -422,20 +506,40 @@ def run_native_self_play(
         promotion_due = iteration % promotion_interval == 0
         promotion_min_games = int(self_play.get("promotion_min_games", 8))
         promotion_threshold = float(self_play.get("promotion_win_rate", 0.55))
+        promotion_scripted_min_games = int(
+            self_play.get("promotion_scripted_min_games", 0)
+        )
+        promotion_scripted_threshold = float(
+            self_play.get("promotion_scripted_win_rate", 0.0)
+        )
+        promotion_scripted_win_rate = (
+            float(np.mean(scripted_promotion_outcomes))
+            if scripted_promotion_outcomes
+            else 0.0
+        )
+        scripted_gate_passed = (
+            len(scripted_promotion_outcomes) >= promotion_scripted_min_games
+            and promotion_scripted_win_rate >= promotion_scripted_threshold
+        )
         promoted = (
             promotion_due
             and len(promotion_outcomes) >= promotion_min_games
             and promotion_win_rate >= promotion_threshold
+            and scripted_gate_passed
         )
         if promoted:
             snapshots.append(_cpu_state_dict(model))
             snapshot_stats.append({"games": 0.0, "wins": 0.0})
             promotion_outcomes.clear()
+            scripted_promotion_outcomes.clear()
             if len(snapshots) > pool_size:
                 snapshots.pop(0)
                 snapshot_stats.pop(0)
         elif promotion_due:
             promotion_outcomes = promotion_outcomes[-max(promotion_min_games * 4, 32) :]
+            scripted_promotion_outcomes = scripted_promotion_outcomes[
+                -max(promotion_scripted_min_games * 4, 32) :
+            ]
 
         elapsed = time.perf_counter() - started
         metrics = {
@@ -451,10 +555,14 @@ def run_native_self_play(
             "snapshot_win_rate": float(np.mean(snapshot_outcomes)) if snapshot_outcomes else None,
             "promotion_window_games": len(promotion_outcomes),
             "promotion_window_win_rate": promotion_win_rate,
+            "promotion_scripted_games": len(scripted_promotion_outcomes),
+            "promotion_scripted_win_rate": promotion_scripted_win_rate,
+            "promotion_scripted_gate_passed": scripted_gate_passed,
             "promoted": promoted,
             "mean_score_difference": float(np.mean(score_differences)),
             "pool_size": len(snapshots),
-            "cuda_peak_gib": torch.cuda.max_memory_allocated() / 2**30,
+            "device": device.type,
+            "cuda_peak_gib": torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0.0,
             "kl_early_stop": bool(update_metrics["kl"] > float(native.get("target_kl", 0.03))),
             **update_metrics,
         }
@@ -476,6 +584,7 @@ def run_native_self_play(
                     "snapshots": snapshots,
                     "snapshot_stats": snapshot_stats,
                     "promotion_outcomes": promotion_outcomes,
+                    "scripted_promotion_outcomes": scripted_promotion_outcomes,
                 },
                 checkpoint_path,
             )

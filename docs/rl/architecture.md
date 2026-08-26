@@ -27,7 +27,7 @@ Actor 输入允许：双方公开 farm、双方银行、本人 private、公共 
 
 `CandidateGenerator` 根据单位位置、当前 tile、本人种子/库存和公开状态生成候选；固定 `PASS`/`NO_ORDER` 处理 padding。`JointActionCodec` 把固定形状的索引还原为官方的可变 hand 数和有序 market 队列。候选集是有意保守的，BC 遇到集合外专家动作会计入 `skipped`，不会偷偷改成 PASS。
 
-目前 market 队列 mask 是“单槽在当前 observation 下可行”，同一物品被多个槽重复出售仍需要自回归资源预留。正式长跑前应把市场 decoder 升级为逐槽更新资金、shed 数量和订单效果的 autoregressive mask；在此之前用 deterministic safety compiler 对整队列二次过滤。
+native PPO 和 checkpoint 评测使用前缀条件 mask：后续槽会预留共享种子、资金、shed 数量、市场库存、雇工和土地成本，并在首个 `NO_ORDER` 后关闭队列。PPO 保存实际采样时使用的动态 mask，从而让更新阶段的 likelihood 与真正执行动作一致。`JointActionCodec.decode` 仍保留 deterministic safety compiler，作为外部模型或旧 checkpoint 的最后一道防线。
 
 ## BC 到自博弈 PPO
 

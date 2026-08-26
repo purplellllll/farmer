@@ -1,0 +1,21 @@
+{
+  "candidate": "builtin:starter",
+  "opponents": [
+    "builtin:starter",
+    "builtin:crop_fast",
+    "builtin:premium",
+    "builtin:expansion",
+    "builtin:market",
+    "builtin:defense",
+    "builtin:random"
+  ],
+  "seed_start": 20260900,
+  "seed_count": 8,
+  "episode_steps": 720,
+  "swap_seats": true,
+  "policy_timeout_seconds": 1.0,
+  "max_policy_faults": 3,
+  "workers": 1,
+  "output_dir": "artifacts/eval/default",
+  "debug": false
+}
