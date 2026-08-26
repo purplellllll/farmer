@@ -101,6 +101,7 @@ def build(args: argparse.Namespace) -> dict[str, object]:
         "kind": "kaggriculture-eight-model-router",
         "models": model_names,
         "model_count": len(model_names),
+        "vendor_wheels": [wheel.name for wheel in args.vendor_wheel],
         "classes": classes,
         "cpu_forced": not args.preserve_bundle,
         "runtime_cpu_patch": True,
