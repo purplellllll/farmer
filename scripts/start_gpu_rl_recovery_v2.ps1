@@ -36,15 +36,20 @@ $stdout = Join-Path $logDir "stdout.log"
 $stderr = Join-Path $logDir "stderr.log"
 $launcher = Start-Process -FilePath $python -ArgumentList $arguments -PassThru -WindowStyle Hidden `
     -WorkingDirectory $repoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+$launcher.PriorityClass = "BelowNormal"
 Start-Sleep -Milliseconds 750
 $worker = Get-CimInstance Win32_Process |
     Where-Object { $_.ParentProcessId -eq $launcher.Id -and $_.Name -eq "python.exe" } |
     Select-Object -First 1
+if ($worker) {
+    (Get-Process -Id $worker.ProcessId).PriorityClass = "BelowNormal"
+}
 $manifest = [ordered]@{
     schema_version = "farmer-gpu-rl-process/v2"
     launcher_pid = $launcher.Id
     worker_pid = if ($worker) { $worker.ProcessId } else { $null }
     device = "cuda"
+    priority = "BelowNormal"
     iterations = $Iterations
     config = $configPath
     bc_checkpoint = $bcPath
