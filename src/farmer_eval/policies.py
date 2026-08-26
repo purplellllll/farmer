@@ -288,7 +288,14 @@ class CheckpointPolicy:
                 torch.tensor(tokenized.attention_mask, dtype=torch.bool, device=self.device).unsqueeze(0),
                 torch.tensor(mask, dtype=torch.bool, device=self.device).unsqueeze(0),
             )
-        indices = logits.argmax(dim=-1).squeeze(0).cpu().tolist()
+        def chooser(slot_index: int, _candidate_set: Any, valid_mask: tuple[int, ...]) -> int:
+            row_mask = torch.tensor(valid_mask, dtype=torch.bool, device=self.device)
+            row = logits[0, slot_index].float().masked_fill(
+                ~row_mask, torch.finfo(torch.float32).min
+            )
+            return int(row.argmax().item())
+
+        indices, _ = self.codec.select(observation, chooser)
         return self.codec.decode(observation, indices)
 
 

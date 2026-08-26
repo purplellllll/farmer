@@ -246,6 +246,44 @@ class TokenAndActionTests(unittest.TestCase):
         action = codec.decode(obs, [0, *buy_indices])
         self.assertEqual(action["market"], [["BUY_SEED", "WHEAT", 1]])
 
+    def test_prefix_conditioned_selection_masks_duplicate_market_orders(self):
+        obs = observation(0)
+        codec = JointActionCodec(CandidateGenerator(capacity=64), max_hands=0, max_orders=3)
+
+        def chooser(_slot_index, candidate_set, valid_mask):
+            for index, candidate in enumerate(candidate_set.candidates):
+                if candidate.action == ("BUY_SEED", "WHEAT", 1) and valid_mask[index]:
+                    return index
+            return 0
+
+        indices, masks = codec.select(obs, chooser)
+        action = codec.decode(obs, indices)
+        rows = [masks[index * 64 : (index + 1) * 64] for index in range(codec.slots)]
+        repeated_buy_index = next(
+            index
+            for index, candidate in enumerate(codec.candidates(obs)[-2].candidates)
+            if candidate.action == ("BUY_SEED", "WHEAT", 1)
+        )
+        self.assertEqual(action["market"], [["BUY_SEED", "WHEAT", 1]])
+        self.assertEqual(rows[-2][repeated_buy_index], 0)
+        self.assertEqual(sum(rows[-1]), 1)
+
+    def test_prefix_conditioned_selection_reserves_shared_seeds(self):
+        obs = observation(0, hands=3)
+        obs["farms"][0]["hands"] = [[1, 0], [2, 0], [3, 0]]
+        codec = JointActionCodec(CandidateGenerator(capacity=64), max_hands=3, max_orders=1)
+
+        def chooser(_slot_index, candidate_set, valid_mask):
+            for index, candidate in enumerate(candidate_set.candidates):
+                if candidate.action == ("PLANT", "WHEAT") and valid_mask[index]:
+                    return index
+            return 0
+
+        indices, _ = codec.select(obs, chooser)
+        action = codec.decode(obs, indices)
+        self.assertEqual(action["hands"][:2], [["PLANT", "WHEAT"], ["PLANT", "WHEAT"]])
+        self.assertEqual(action["hands"][2], ["PASS"])
+
 
 class OpponentAndConfigTests(unittest.TestCase):
     def test_pfsp_prefers_near_even_opponent(self):
@@ -266,6 +304,7 @@ class OpponentAndConfigTests(unittest.TestCase):
         for filename in (
             "ppo.json",
             "local_4060.json",
+            "local_4060_recovery_v2.json",
             "cpu_v2.json",
             "cpu_v2_smoke.json",
             "population.json",
