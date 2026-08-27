@@ -4,7 +4,8 @@ param(
     [double]$MaxWorkerPrivateGiB = 4.0,
     [string]$Config = "configs/rl/cpu_recovery_v3.json",
     [string]$BcCheckpoint = "checkpoints/starter_bc_v5.pt",
-    [string]$OutputDir = "artifacts/cpu-rl-recovery-v3"
+    [string]$OutputDir = "artifacts/cpu-rl-recovery-v3",
+    [string]$ResumeCheckpoint = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +14,10 @@ $runner = Join-Path $PSScriptRoot "run_cpu_rl_recovery_segments.ps1"
 $configPath = (Resolve-Path (Join-Path $repoRoot $Config)).Path
 $bcPath = (Resolve-Path (Join-Path $repoRoot $BcCheckpoint)).Path
 $resolvedOutput = [IO.Path]::GetFullPath((Join-Path $repoRoot $OutputDir))
+$resumePath = ""
+if ($ResumeCheckpoint) {
+    $resumePath = (Resolve-Path (Join-Path $repoRoot $ResumeCheckpoint)).Path
+}
 $logDir = Join-Path $resolvedOutput "process-logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
@@ -26,6 +31,9 @@ $arguments = @(
     "-BcCheckpoint", $bcPath,
     "-OutputDir", $resolvedOutput
 )
+if ($resumePath) {
+    $arguments += @("-ResumeCheckpoint", $resumePath)
+}
 $stdout = Join-Path $logDir "supervisor.stdout.log"
 $stderr = Join-Path $logDir "supervisor.stderr.log"
 $statePath = Join-Path $resolvedOutput "process.json"
