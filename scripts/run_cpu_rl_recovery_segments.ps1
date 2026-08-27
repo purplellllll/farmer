@@ -38,9 +38,17 @@ $interventionCount = 0
 $lastInterventionIteration = 0
 if (Test-Path -LiteralPath $statePath) {
     $existingState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-    $completed = [int]($existingState.completed_iterations ?? $existingState.completed_before_segment ?? 0)
-    $interventionCount = [int]($existingState.intervention_count ?? 0)
-    $lastInterventionIteration = [int]($existingState.last_intervention_iteration ?? 0)
+    if ($null -ne $existingState.completed_iterations) {
+        $completed = [int]$existingState.completed_iterations
+    } elseif ($null -ne $existingState.completed_before_segment) {
+        $completed = [int]$existingState.completed_before_segment
+    }
+    if ($null -ne $existingState.intervention_count) {
+        $interventionCount = [int]$existingState.intervention_count
+    }
+    if ($null -ne $existingState.last_intervention_iteration) {
+        $lastInterventionIteration = [int]$existingState.last_intervention_iteration
+    }
 }
 
 function Get-RecentMetricWindow {

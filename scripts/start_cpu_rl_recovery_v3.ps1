@@ -16,12 +16,18 @@ $bcPath = (Resolve-Path (Join-Path $repoRoot $BcCheckpoint)).Path
 $resolvedOutput = [IO.Path]::GetFullPath((Join-Path $repoRoot $OutputDir))
 $resumePath = ""
 if ($ResumeCheckpoint) {
-    $resumePath = (Resolve-Path (Join-Path $repoRoot $ResumeCheckpoint)).Path
+    $resumeCandidate = if ([IO.Path]::IsPathRooted($ResumeCheckpoint)) {
+        $ResumeCheckpoint
+    } else {
+        Join-Path $repoRoot $ResumeCheckpoint
+    }
+    $resumePath = (Resolve-Path $resumeCandidate).Path
 }
 $logDir = Join-Path $resolvedOutput "process-logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
-$pwsh = (Get-Process -Id $PID).Path
+$pwshCommand = Get-Command "pwsh.exe" -ErrorAction SilentlyContinue
+$pwsh = if ($pwshCommand) { $pwshCommand.Source } else { (Get-Process -Id $PID).Path }
 $arguments = @(
     "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runner,
     "-Iterations", "$Iterations",

@@ -336,6 +336,7 @@ class OpponentAndConfigTests(unittest.TestCase):
             "local_4060_recovery_v2.json",
             "local_4060_recovery_v5.json",
             "cpu_recovery_v3.json",
+            "cpu_recovery_v5.json",
             "cpu_v2.json",
             "cpu_v2_smoke.json",
             "population.json",
