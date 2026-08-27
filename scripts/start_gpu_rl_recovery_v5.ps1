@@ -28,12 +28,22 @@ $resumePath = $null
 if ($Resume) {
     $resumePath = (Resolve-Path (Join-Path $repoRoot $Resume)).Path
     $arguments += @("--resume", $resumePath)
+    # Older PPO checkpoints do not contain the frozen BC anchor. Passing the
+    # original BC checkpoint makes those resumes backward compatible; newer
+    # checkpoints are self-contained and simply ignore this fallback.
+    $bcPath = (Resolve-Path (Join-Path $repoRoot $BcCheckpoint)).Path
+    $arguments += @("--bc-checkpoint", $bcPath)
 } else {
     $bcPath = (Resolve-Path (Join-Path $repoRoot $BcCheckpoint)).Path
     $arguments += @("--bc-checkpoint", $bcPath)
 }
-$stdout = Join-Path $logDir "stdout.log"
-$stderr = Join-Path $logDir "stderr.log"
+$logStem = if ($Resume) {
+    "resume_{0}" -f (Get-Date -Format "yyyyMMdd_HHmmss")
+} else {
+    "initial"
+}
+$stdout = Join-Path $logDir ("{0}.stdout.log" -f $logStem)
+$stderr = Join-Path $logDir ("{0}.stderr.log" -f $logStem)
 $launcher = Start-Process -FilePath $python -ArgumentList $arguments -PassThru -WindowStyle Hidden `
     -WorkingDirectory $repoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr
 $launcher.PriorityClass = "BelowNormal"
