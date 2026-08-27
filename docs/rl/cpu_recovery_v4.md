@@ -37,3 +37,16 @@ Launch:
 powershell -ExecutionPolicy Bypass -File scripts\start_cpu_rl_recovery_v4.ps1 `
   -Iterations 50 -SegmentIterations 1 -MaxWorkerPrivateGiB 4.0
 ```
+
+## Recorded v4 result
+
+The resumed run completed checkpoints 2--7. The initial three-iteration
+window was five losses with a mean score difference of -227.7 and mean entropy
+0.0223, so intervention 1 was applied. It made the update stable and shortened
+single-game segments to about 93 seconds, but the following three iterations
+were again all losses, with mean score difference -100 and mean entropy 0.0228.
+Intervention 2 was recorded, but the CPU job was then deliberately paused before
+spending a third evaluation window. The preserved terminal checkpoint is
+`artifacts/cpu-rl-recovery-v4/checkpoints/iteration_000007.pt`; exact evidence is
+in the artifact directory's `collapse_interventions.jsonl` and
+`collapse_conclusion.json`.
