@@ -15,7 +15,7 @@ from farmer_rl.collector import collect_episode
 from farmer_rl.environment import KaggricultureEnv, pass_action
 from farmer_rl.errors import InvalidActionError, SeatSafetyError
 from farmer_rl.opponents import OpponentPool, OpponentSpec
-from farmer_rl.native_ppo import _terminal_reward, _update
+from farmer_rl.native_ppo import _potential, _terminal_reward, _update
 from farmer_rl.tokenizer import FEATURE_DIM, ObservationTokenizer, TILE_KINDS
 from farmer_rl.trajectory import EpisodeTrajectory, Transition
 
@@ -301,6 +301,47 @@ class TokenAndActionTests(unittest.TestCase):
 
 
 class OpponentAndConfigTests(unittest.TestCase):
+    def test_productive_shaping_preserves_planted_capital_and_values_maturity(self):
+        seed_state = observation(0)
+        seed_state["farms"][0]["money"] = seed_state["farms"][1]["money"]
+        seed_state["farms"][0]["tiles"][0][0] = None
+        seed_state["private"]["shed"] = {}
+        seed_state["private"]["seeds"] = {"WHEAT": 1}
+
+        planted_state = deepcopy(seed_state)
+        planted_state["private"]["seeds"] = {}
+        planted_state["farms"][0]["tiles"][0][0] = {
+            "kind": "PLANT",
+            "crop": "WHEAT",
+            "planted_day": 0,
+            "watered_today": False,
+            "consecutive_unwatered": 1,
+            "yield_units": 0,
+        }
+        mature_state = deepcopy(planted_state)
+        mature_state["day"] = 2
+        mature_state["farms"][0]["tiles"][0][0].update(
+            watered_today=True,
+            consecutive_unwatered=0,
+            yield_units=2,
+        )
+
+        self.assertLess(_potential(planted_state, 0), _potential(seed_state, 0))
+        self.assertAlmostEqual(
+            _potential(planted_state, 0, profile="production_cycle_v2"),
+            _potential(seed_state, 0, profile="production_cycle_v2"),
+        )
+        self.assertGreater(
+            _potential(mature_state, 0, profile="production_cycle_v2"),
+            _potential(planted_state, 0, profile="production_cycle_v2"),
+        )
+
+    def test_shaping_profile_is_validated(self):
+        with self.assertRaises(ValueError):
+            _potential(observation(0), 0, profile="unknown")
+        with self.assertRaises(ValueError):
+            _potential(observation(0), 0, scale=0)
+
     def test_terminal_reward_preserves_win_order_and_dense_loss_margin(self):
         close_outcome, close_reward = _terminal_reward(
             -100, score_coefficient=0.25, score_scale=1000

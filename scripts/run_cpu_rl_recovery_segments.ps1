@@ -18,10 +18,32 @@ $logDir = Join-Path $resolvedOutput "process-logs"
 $statePath = Join-Path $resolvedOutput "process.json"
 $runtimeConfigPath = Join-Path $resolvedOutput "runtime_config.json"
 $interventionPath = Join-Path $resolvedOutput "collapse_interventions.jsonl"
+$rewardRedesignPath = Join-Path $resolvedOutput "reward_redesigns.jsonl"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 if (-not (Test-Path -LiteralPath $runtimeConfigPath)) {
     Copy-Item -LiteralPath $sourceConfigPath -Destination $runtimeConfigPath
+}
+# Existing recovery directories keep their tuned runtime config.  Merge only
+# newly introduced reward-redesign fields so a previously paused run can
+# continue from its latest checkpoint without discarding prior interventions.
+$sourceConfig = Get-Content -LiteralPath $sourceConfigPath -Raw | ConvertFrom-Json
+$runtimeConfig = Get-Content -LiteralPath $runtimeConfigPath -Raw | ConvertFrom-Json
+$runtimeChanged = $false
+if ($null -eq $runtimeConfig.cpu_recovery.reward_redesign) {
+    $runtimeConfig.cpu_recovery | Add-Member -NotePropertyName reward_redesign -NotePropertyValue $sourceConfig.cpu_recovery.reward_redesign -Force
+    $runtimeChanged = $true
+}
+if ($null -eq $runtimeConfig.training.shaping_profile) {
+    $runtimeConfig.training | Add-Member -NotePropertyName shaping_profile -NotePropertyValue $sourceConfig.training.shaping_profile -Force
+    $runtimeChanged = $true
+}
+if ($null -eq $runtimeConfig.training.shaping_scale) {
+    $runtimeConfig.training | Add-Member -NotePropertyName shaping_scale -NotePropertyValue $sourceConfig.training.shaping_scale -Force
+    $runtimeChanged = $true
+}
+if ($runtimeChanged) {
+    $runtimeConfig | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $runtimeConfigPath
 }
 if ($ResumeCheckpoint) {
     $initialResumePath = (Resolve-Path $ResumeCheckpoint).Path
@@ -35,6 +57,7 @@ $env:MKL_NUM_THREADS = "4"
 
 $completed = 0
 $interventionCount = 0
+$rewardRedesignCount = 0
 $lastInterventionIteration = 0
 if (Test-Path -LiteralPath $statePath) {
     $existingState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
@@ -45,6 +68,9 @@ if (Test-Path -LiteralPath $statePath) {
     }
     if ($null -ne $existingState.intervention_count) {
         $interventionCount = [int]$existingState.intervention_count
+    }
+    if ($null -ne $existingState.reward_redesign_count) {
+        $rewardRedesignCount = [int]$existingState.reward_redesign_count
     }
     if ($null -ne $existingState.last_intervention_iteration) {
         $lastInterventionIteration = [int]$existingState.last_intervention_iteration
@@ -113,7 +139,8 @@ function Invoke-CollapseIntervention {
         target_kl = [double]$config.native.target_kl
         scripted_opponent_probability = [double]$config.native.scripted_opponent_probability
     }
-    Copy-Item -LiteralPath $runtimeConfigPath -Destination (Join-Path $resolvedOutput ("runtime_config.before_intervention_{0:D2}.json" -f $Number))
+    $interventionBackup = "runtime_config.before_reward_{0:D2}_intervention_{1:D2}.json" -f $rewardRedesignCount, $Number
+    Copy-Item -LiteralPath $runtimeConfigPath -Destination (Join-Path $resolvedOutput $interventionBackup)
     $config.training.lr = [math]::Max([double]$recovery.min_lr, [double]$config.training.lr * [double]$recovery.lr_multiplier)
     $config.training.clip_param = [math]::Max([double]$recovery.min_clip_param, [double]$config.training.clip_param * [double]$recovery.clip_multiplier)
     $config.training.terminal_score_coeff = [math]::Min([double]$recovery.max_terminal_score_coeff, [double]$config.training.terminal_score_coeff + [double]$recovery.terminal_score_increment)
@@ -134,6 +161,7 @@ function Invoke-CollapseIntervention {
     [ordered]@{
         timestamp = (Get-Date).ToString("o")
         intervention = $Number
+        reward_stage = $rewardRedesignCount
         reason = $Assessment.reason
         window_metrics = @($Assessment.metrics)
         aggregate = [ordered]@{
@@ -148,23 +176,88 @@ function Invoke-CollapseIntervention {
     } | ConvertTo-Json -Depth 10 -Compress | Add-Content -Encoding UTF8 $interventionPath
 }
 
+function Invoke-RewardRedesign {
+    param([int]$Number, [object]$Assessment)
+    $config = Get-Content -LiteralPath $runtimeConfigPath -Raw | ConvertFrom-Json
+    $profiles = @($config.cpu_recovery.reward_redesign.profiles)
+    if ($profiles.Count -eq 0) {
+        throw "cpu_recovery.reward_redesign.profiles must contain at least one profile"
+    }
+    $profile = $profiles[($Number - 1) % $profiles.Count]
+    $before = [ordered]@{
+        shaping_profile = $config.training.shaping_profile
+        shaping_scale = $config.training.shaping_scale
+        lr = [double]$config.training.lr
+        clip_param = [double]$config.training.clip_param
+        terminal_score_coeff = [double]$config.training.terminal_score_coeff
+        entropy_coeff = [double]$config.native.entropy_coeff
+        target_kl = [double]$config.native.target_kl
+        scripted_opponent_probability = [double]$config.native.scripted_opponent_probability
+    }
+    Copy-Item -LiteralPath $runtimeConfigPath -Destination (Join-Path $resolvedOutput ("runtime_config.before_reward_redesign_{0:D2}.json" -f $Number))
+    $config.training | Add-Member -NotePropertyName shaping_profile -NotePropertyValue ([string]$profile.shaping_profile) -Force
+    $config.training | Add-Member -NotePropertyName shaping_scale -NotePropertyValue ([double]$profile.shaping_scale) -Force
+    $config.training.lr = [double]$profile.lr
+    $config.training.clip_param = [double]$profile.clip_param
+    $config.training.terminal_score_coeff = [double]$profile.terminal_score_coeff
+    $config.native.update_epochs = [int]$profile.update_epochs
+    $config.native.entropy_coeff = [double]$profile.entropy_coeff
+    $config.native.target_kl = [double]$profile.target_kl
+    $config.native.scripted_opponent_probability = [double]$profile.scripted_opponent_probability
+    $config | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $runtimeConfigPath
+    $after = [ordered]@{
+        shaping_profile = [string]$config.training.shaping_profile
+        shaping_scale = [double]$config.training.shaping_scale
+        lr = [double]$config.training.lr
+        clip_param = [double]$config.training.clip_param
+        terminal_score_coeff = [double]$config.training.terminal_score_coeff
+        entropy_coeff = [double]$config.native.entropy_coeff
+        target_kl = [double]$config.native.target_kl
+        scripted_opponent_probability = [double]$config.native.scripted_opponent_probability
+    }
+    [ordered]@{
+        timestamp = (Get-Date).ToString("o")
+        reward_redesign = $Number
+        profile_index = (($Number - 1) % $profiles.Count)
+        reason = $Assessment.reason
+        window_metrics = @($Assessment.metrics)
+        aggregate = [ordered]@{
+            mean_win_rate = $Assessment.mean_win_rate
+            mean_score_difference = $Assessment.mean_score_difference
+            mean_kl = $Assessment.mean_kl
+            mean_entropy = $Assessment.mean_entropy
+            kl_early_stops = $Assessment.kl_early_stops
+        }
+        before = $before
+        after = $after
+        action = "restart_from_latest_checkpoint"
+    } | ConvertTo-Json -Depth 10 -Compress | Add-Content -Encoding UTF8 $rewardRedesignPath
+}
+
+function Invoke-CollapseResponse {
+    param([object]$Assessment, [object[]]$Window)
+    $config = Get-Content -LiteralPath $runtimeConfigPath -Raw | ConvertFrom-Json
+    $script:lastInterventionIteration = [int]$Window[-1].iteration
+    $maxInterventions = [int]$config.cpu_recovery.max_interventions
+    if ($script:interventionCount -lt $maxInterventions) {
+        $script:interventionCount += 1
+        Invoke-CollapseIntervention -Number $script:interventionCount -Assessment $Assessment
+        return
+    }
+    # Reaching the intervention ceiling is a reward-stage transition, never an
+    # automatic pause.  The next segment process loads the latest checkpoint
+    # with the redesigned shaping profile and reset intervention budget.
+    $script:rewardRedesignCount += 1
+    Invoke-RewardRedesign -Number $script:rewardRedesignCount -Assessment $Assessment
+    $script:interventionCount = 0
+}
+
 function Invoke-PreflightCollapseAssessment {
     $config = Get-Content -LiteralPath $runtimeConfigPath -Raw | ConvertFrom-Json
     $window = Get-RecentMetricWindow -Count ([int]$config.cpu_recovery.collapse_monitor.window_iterations) -AfterIteration $lastInterventionIteration
     $assessment = Test-PolicyCollapse -Metrics $window
     if (-not $assessment.detected) { return }
-    $maxInterventions = [int]$config.cpu_recovery.max_interventions
-    if ($interventionCount -ge $maxInterventions) {
-        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-        $state.status = "paused_policy_collapse"
-        $state | Add-Member -NotePropertyName collapse_assessment -NotePropertyValue $assessment -Force
-        $state | Add-Member -NotePropertyName updated_at -NotePropertyValue (Get-Date).ToString("o") -Force
-        $state | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $statePath
-        exit 2
-    }
-    $script:interventionCount += 1
-    $script:lastInterventionIteration = [int]$window[-1].iteration
-    Invoke-CollapseIntervention -Number $script:interventionCount -Assessment $assessment
+    Invoke-CollapseResponse -Assessment $assessment -Window $window
 }
 
 Invoke-PreflightCollapseAssessment
@@ -207,7 +300,7 @@ while ($completed -lt $Iterations) {
     }
 
     [ordered]@{
-        schema_version = "farmer-cpu-rl-process/v2"
+        schema_version = "farmer-cpu-rl-process/v3"
         status = "running"
         supervisor_pid = $PID
         launcher_pid = $launcher.Id
@@ -224,7 +317,9 @@ while ($completed -lt $Iterations) {
         bc_checkpoint = if ($resumePath) { $null } else { $bcPath }
         resume_checkpoint = $resumePath
         intervention_count = $interventionCount
+        reward_redesign_count = $rewardRedesignCount
         last_intervention_iteration = $lastInterventionIteration
+        shaping_profile = (Get-Content -LiteralPath $runtimeConfigPath -Raw | ConvertFrom-Json).training.shaping_profile
         output_dir = $resolvedOutput
         stdout = $stdout
         stderr = $stderr
@@ -273,21 +368,7 @@ while ($completed -lt $Iterations) {
     $window = Get-RecentMetricWindow -Count ([int]$monitor.window_iterations) -AfterIteration $lastInterventionIteration
     $assessment = Test-PolicyCollapse -Metrics $window
     if ($assessment.detected) {
-        $maxInterventions = [int]$runtimeConfig.cpu_recovery.max_interventions
-        if ($interventionCount -ge $maxInterventions) {
-            $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-            $state.status = "paused_policy_collapse"
-            $state | Add-Member -NotePropertyName completed_iterations -NotePropertyValue $completed -Force
-            $state | Add-Member -NotePropertyName intervention_count -NotePropertyValue $interventionCount -Force
-            $state | Add-Member -NotePropertyName last_intervention_iteration -NotePropertyValue $lastInterventionIteration -Force
-            $state | Add-Member -NotePropertyName collapse_assessment -NotePropertyValue $assessment -Force
-            $state | Add-Member -NotePropertyName updated_at -NotePropertyValue (Get-Date).ToString("o") -Force
-            $state | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $statePath
-            exit 2
-        }
-        $interventionCount += 1
-        $lastInterventionIteration = [int]$window[-1].iteration
-        Invoke-CollapseIntervention -Number $interventionCount -Assessment $assessment
+        Invoke-CollapseResponse -Assessment $assessment -Window $window
     }
 }
 
@@ -295,6 +376,8 @@ $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
 $state.status = "completed"
 $state | Add-Member -NotePropertyName completed_iterations -NotePropertyValue $Iterations -Force
 $state | Add-Member -NotePropertyName intervention_count -NotePropertyValue $interventionCount -Force
+$state | Add-Member -NotePropertyName reward_redesign_count -NotePropertyValue $rewardRedesignCount -Force
 $state | Add-Member -NotePropertyName last_intervention_iteration -NotePropertyValue $lastInterventionIteration -Force
+$state | Add-Member -NotePropertyName shaping_profile -NotePropertyValue ((Get-Content -LiteralPath $runtimeConfigPath -Raw | ConvertFrom-Json).training.shaping_profile) -Force
 $state | Add-Member -NotePropertyName updated_at -NotePropertyValue (Get-Date).ToString("o") -Force
 $state | ConvertTo-Json | Set-Content -Encoding UTF8 $statePath

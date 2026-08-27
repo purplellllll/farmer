@@ -23,6 +23,48 @@ from .model import ModelConfig, build_actor_critic
 from .tokenizer import ObservationTokenizer
 
 
+# Kept local rather than importing the official environment internals so a
+# training checkpoint remains usable with a packaged Kaggriculture agent.
+_CROP_FIRST_YIELD_DAYS = {
+    "WHEAT": 2,
+    "CARROT": 2,
+    "TOMATO": 8,
+    "STRAWBERRY": 10,
+    "MELON": 10,
+}
+_ANIMAL_PRODUCTS = {"GOOSE": "EGG", "COW": "MILK", "SHEEP": "WOOL"}
+_SHAPING_PROFILES: dict[str, dict[str, float]] = {
+    "liquidation_v1": {
+        "crop_capital": 0.0,
+        "crop_progress": 0.0,
+        "crop_yield": 0.0,
+        "structure": 0.0,
+        "animal_capital": 0.0,
+        "animal_yield": 0.0,
+    },
+    # Preserve invested capital and supply intermediate credit for completing
+    # the plant/water/grow and place/feed/care cycles.
+    "production_cycle_v2": {
+        "crop_capital": 1.0,
+        "crop_progress": 0.25,
+        "crop_yield": 0.60,
+        "structure": 5.0,
+        "animal_capital": 1.0,
+        "animal_yield": 0.65,
+    },
+    # If production-cycle credit still collapses, move credit closer to output
+    # that can actually be harvested and sold while retaining planted capital.
+    "harvest_market_v3": {
+        "crop_capital": 0.85,
+        "crop_progress": 0.10,
+        "crop_yield": 1.0,
+        "structure": 2.0,
+        "animal_capital": 0.90,
+        "animal_yield": 1.0,
+    },
+}
+
+
 def _torch() -> Any:
     import torch
 
@@ -103,8 +145,70 @@ def _sample(
     )
 
 
-def _potential(observation: Mapping[str, Any], learner_seat: int) -> float:
-    """Bounded public/own-private liquidation proxy used only for shaping."""
+def _productive_board_value(
+    farm: Mapping[str, Any],
+    *,
+    day: int,
+    market_prices: Mapping[str, Any],
+    weights: Mapping[str, float],
+) -> float:
+    value = 0.0
+    for row in farm.get("tiles", []) or []:
+        if not isinstance(row, list):
+            continue
+        for tile in row:
+            if not isinstance(tile, Mapping):
+                continue
+            kind = str(tile.get("kind", ""))
+            if kind == "PLANT":
+                crop = str(tile.get("crop", ""))
+                seed_value = float(SEED_COSTS.get(crop, 0))
+                market_value = float(max(0, int(market_prices.get(crop, 0) or 0)))
+                planted_day = tile.get("planted_day", day)
+                age = max(0, day - int(day if planted_day is None else planted_day))
+                first_yield = max(1, _CROP_FIRST_YIELD_DAYS.get(crop, 1))
+                progress = min(1.0, age / first_yield)
+                # Watering changes a transient flag, but the resulting growth
+                # and yield persist across the day boundary.  Health only
+                # discounts the prospective component, never planted capital.
+                missed = max(0, int(tile.get("consecutive_unwatered", 0) or 0))
+                health = 1.0 if tile.get("watered_today", False) else max(0.2, 1.0 - 0.35 * missed)
+                units = max(0, int(tile.get("yield_units", 0) or 0))
+                maturity = 0.25 + 0.75 * progress
+                value += weights["crop_capital"] * seed_value
+                value += weights["crop_progress"] * market_value * progress * health
+                value += weights["crop_yield"] * market_value * units * maturity * health
+                continue
+            if kind in {"COOP", "PASTURE"}:
+                value += weights["structure"]
+                animal = str(tile.get("animal", ""))
+                if not animal:
+                    continue
+                value += weights["animal_capital"] * float(ANIMAL_COSTS.get(animal, 0))
+                product = _ANIMAL_PRODUCTS.get(animal, "")
+                product_price = float(max(0, int(market_prices.get(product, 0) or 0)))
+                units = max(0, int(tile.get("yield_units", 0) or 0))
+                health = 1.0
+                if int(tile.get("consecutive_unfed", 0) or 0) > 0:
+                    health = 0.5
+                value += weights["animal_yield"] * product_price * units * health
+    return value
+
+
+def _potential(
+    observation: Mapping[str, Any],
+    learner_seat: int,
+    *,
+    profile: str = "liquidation_v1",
+    scale: float = 10_000.0,
+) -> float:
+    """Bounded observable asset/production proxy used only for shaping."""
+
+    if profile not in _SHAPING_PROFILES:
+        supported = ", ".join(sorted(_SHAPING_PROFILES))
+        raise ValueError(f"unsupported shaping profile {profile!r}; choose one of: {supported}")
+    if scale <= 0:
+        raise ValueError("training.shaping_scale must be positive")
 
     farms = observation.get("farms", [])
     if not isinstance(farms, list) or len(farms) != 2:
@@ -124,8 +228,22 @@ def _potential(observation: Mapping[str, Any], learner_seat: int) -> float:
                 str(item), max(0, int(market_prices.get(str(item), 0) or 0))
             )
             value += unit_value * max(0, int(count or 0))
+    weights = _SHAPING_PROFILES[profile]
+    day = max(0, int(observation.get("day", 0) or 0))
+    value += _productive_board_value(
+        own,
+        day=day,
+        market_prices=market_prices,
+        weights=weights,
+    )
     opponent_money = float(farms[1 - learner_seat].get("money", 0.0) or 0.0)
-    return math.tanh((value - opponent_money) / 10_000.0)
+    opponent_money += _productive_board_value(
+        farms[1 - learner_seat],
+        day=day,
+        market_prices=market_prices,
+        weights=weights,
+    )
+    return math.tanh((value - opponent_money) / scale)
 
 
 def _terminal_reward(
@@ -177,6 +295,8 @@ def _collect_episode(
     episode_steps: int,
     terminal_score_coefficient: float,
     terminal_score_scale: float,
+    shaping_profile: str,
+    shaping_scale: float,
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     env = KaggricultureEnv(configuration={"episodeSteps": episode_steps})
     observations = env.reset(seed=seed)
@@ -223,7 +343,12 @@ def _collect_episode(
         }
         result = env.step(actions)
         done = result.terminated or result.truncated
-        current_potential = _potential(observations[learner_seat], learner_seat)
+        current_potential = _potential(
+            observations[learner_seat],
+            learner_seat,
+            profile=shaping_profile,
+            scale=shaping_scale,
+        )
         # A zero terminal potential makes the shaping telescope to a policy-
         # independent constant.  The old non-zero terminal potential changed
         # the objective into final cash difference and rewarded PASS-heavy
@@ -231,7 +356,12 @@ def _collect_episode(
         next_potential = (
             0.0
             if done
-            else _potential(result.observations[learner_seat], learner_seat)
+            else _potential(
+                result.observations[learner_seat],
+                learner_seat,
+                profile=shaping_profile,
+                scale=shaping_scale,
+            )
         )
         reward = gamma * next_potential - current_potential
         final_rewards = result.rewards
@@ -544,8 +674,12 @@ def run_native_self_play(
     episode_steps = int(config.get("environment", {}).get("configuration", {}).get("episodeSteps", 720))
     terminal_score_coefficient = float(training.get("terminal_score_coeff", 0.0))
     terminal_score_scale = float(training.get("terminal_score_scale", 1000.0))
+    shaping_profile = str(training.get("shaping_profile", "liquidation_v1"))
+    shaping_scale = float(training.get("shaping_scale", 10_000.0))
     if terminal_score_scale <= 0:
         raise ValueError("training.terminal_score_scale must be positive")
+    # Validate before starting an expensive rollout rather than at step one.
+    _potential({}, 0, profile=shaping_profile, scale=shaping_scale)
     tokenizer = ObservationTokenizer(max_tokens=model_config.max_tokens)
     codec = JointActionCodec(
         CandidateGenerator(capacity=model_config.candidate_capacity),
@@ -594,6 +728,8 @@ def run_native_self_play(
                 episode_steps=episode_steps,
                 terminal_score_coefficient=terminal_score_coefficient,
                 terminal_score_scale=terminal_score_scale,
+                shaping_profile=shaping_profile,
+                shaping_scale=shaping_scale,
             )
             records.extend(episode_records)
             outcome = float(episode_metrics["outcome"])
@@ -689,6 +825,8 @@ def run_native_self_play(
             "device": device.type,
             "cuda_peak_gib": torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0.0,
             "kl_early_stop": bool(update_metrics.pop("kl_early_stop")),
+            "shaping_profile": shaping_profile,
+            "shaping_scale": shaping_scale,
             **update_metrics,
         }
         history.append(metrics)

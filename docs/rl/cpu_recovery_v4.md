@@ -28,8 +28,10 @@ The following resumed worker uses: lower learning rate and clip range, one PPO
 epoch, tighter target KL, higher entropy coefficient, a stronger bounded final
 score margin reward, and at least 90% scripted-baseline opponents. The checkpoint
 keeps optimizer state, while native PPO reapplies the current runtime learning
-rate on resume. After two failed interventions the run pauses as
-`paused_policy_collapse` rather than restarting indefinitely.
+rate on resume. This was the historical v4 policy. The shared supervisor now
+follows the v5 behavior documented in `cpu_recovery_v5.md`: after two failed
+interventions it changes reward stage and continues from the latest checkpoint
+instead of automatically pausing.
 
 Launch:
 
