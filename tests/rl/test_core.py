@@ -15,7 +15,7 @@ from farmer_rl.collector import collect_episode
 from farmer_rl.environment import KaggricultureEnv, pass_action
 from farmer_rl.errors import InvalidActionError, SeatSafetyError
 from farmer_rl.opponents import OpponentPool, OpponentSpec
-from farmer_rl.native_ppo import _terminal_reward
+from farmer_rl.native_ppo import _terminal_reward, _update
 from farmer_rl.tokenizer import FEATURE_DIM, ObservationTokenizer, TILE_KINDS
 from farmer_rl.trajectory import EpisodeTrajectory, Transition
 
@@ -334,6 +334,7 @@ class OpponentAndConfigTests(unittest.TestCase):
             "ppo.json",
             "local_4060.json",
             "local_4060_recovery_v2.json",
+            "local_4060_recovery_v5.json",
             "cpu_recovery_v3.json",
             "cpu_v2.json",
             "cpu_v2_smoke.json",
@@ -354,6 +355,57 @@ class OpponentAndConfigTests(unittest.TestCase):
         with (root / "configs" / "rl" / "data_manifest.example.json").open(encoding="utf-8") as handle:
             example = json.load(handle)
         jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(example)
+
+
+@unittest.skipUnless(importlib.util.find_spec("torch"), "torch is optional")
+class NativePpoStabilityTests(unittest.TestCase):
+    def test_update_keeps_dropout_disabled_for_rollout_parity(self):
+        import torch
+        from torch import nn
+
+        class TinyActorCritic(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.logits = nn.Parameter(torch.zeros(1, 1, 2))
+                self.value = nn.Parameter(torch.zeros(1))
+                self.dropout = nn.Dropout(0.9)
+
+            def forward(self, values, _types, _attention, action_mask):
+                logits = self.dropout(self.logits).expand(values.shape[0], -1, -1)
+                return logits.masked_fill(~action_mask, torch.finfo(logits.dtype).min), self.value.expand(values.shape[0])
+
+        model = TinyActorCritic()
+        model.train()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
+        batch = {
+            "tokens": torch.zeros(2, 1, 1),
+            "types": torch.zeros(2, 1, dtype=torch.long),
+            "attention": torch.ones(2, 1, dtype=torch.bool),
+            "action_mask": torch.ones(2, 1, 2, dtype=torch.bool),
+            "actions": torch.zeros(2, 1, dtype=torch.long),
+            "policy_slot_mask": torch.ones(2, 1),
+            "old_log_probability": torch.full((2,), -0.69314718),
+            "old_value": torch.zeros(2),
+            "advantage": torch.tensor([1.0, -1.0]),
+            "return": torch.zeros(2),
+        }
+
+        metrics = _update(
+            model,
+            optimizer,
+            batch,
+            device=torch.device("cpu"),
+            minibatch_size=2,
+            epochs=1,
+            clip_param=0.1,
+            value_coeff=0.5,
+            entropy_coeff=0.0,
+            grad_clip=1.0,
+            target_kl=1.0,
+        )
+
+        self.assertFalse(model.training)
+        self.assertEqual(metrics["kl_early_stop"], 0.0)
 
 
 if __name__ == "__main__":

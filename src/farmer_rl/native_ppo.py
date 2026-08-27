@@ -309,14 +309,41 @@ def _update(
     entropy_coeff: float,
     grad_clip: float,
     target_kl: float,
+    reference_model: Any | None = None,
+    reference_coeff: float = 0.0,
 ) -> dict[str, float]:
+    """Apply a conservative PPO update with an optional frozen BC anchor.
+
+    The anchor is intentionally evaluated on the exact prefix-conditioned masks
+    stored in the rollout.  This prevents a large Transformer from drifting
+    away from the legal, behaviour-cloned action distribution after a handful
+    of noisy long-horizon games.
+    """
+
     torch = _torch()
-    model.train()
+    if reference_coeff < 0:
+        raise ValueError("reference_coeff must be non-negative")
+    if reference_coeff and reference_model is None:
+        raise ValueError("reference_coeff requires a frozen reference model")
+    # Rollouts are sampled under ``learner.eval()``.  Transformer dropout must
+    # remain disabled while recomputing their log probabilities, otherwise PPO
+    # compares a deterministic behaviour policy with a different random policy
+    # every minibatch and reports an artificial KL spike.
+    model.eval()
+    if reference_model is not None:
+        reference_model.eval()
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
     sample_count = len(batch["advantage"])
-    totals = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "kl": 0.0}
+    totals = {
+        "policy_loss": 0.0,
+        "value_loss": 0.0,
+        "entropy": 0.0,
+        "kl": 0.0,
+        "reference_kl": 0.0,
+    }
     updates = 0
     stopped_early = False
+    max_kl = 0.0
     for _ in range(epochs):
         indices = torch.randperm(sample_count)
         for start in range(0, sample_count, minibatch_size):
@@ -348,25 +375,74 @@ def _update(
                 entropy = (
                     (distribution.entropy() * policy_slot_mask).sum(dim=-1) / normalizer
                 ).mean()
-                loss = policy_loss + value_coeff * value_loss - entropy_coeff * entropy
+                reference_kl = torch.zeros((), dtype=torch.float32, device=device)
+                if reference_model is not None:
+                    with torch.no_grad():
+                        reference_logits, _ = reference_model(
+                            tensors["tokens"],
+                            tensors["types"],
+                            tensors["attention"],
+                            tensors["action_mask"],
+                        )
+                    reference_distribution = torch.distributions.Categorical(
+                        logits=reference_logits.float()
+                    )
+                    reference_kl = (
+                        (
+                            torch.distributions.kl_divergence(
+                                distribution, reference_distribution
+                            )
+                            * policy_slot_mask
+                        ).sum(dim=-1)
+                        / normalizer
+                    ).mean()
+                loss = (
+                    policy_loss
+                    + value_coeff * value_loss
+                    - entropy_coeff * entropy
+                    + reference_coeff * reference_kl
+                )
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             scaler.step(optimizer)
             scaler.update()
             with torch.no_grad():
-                approximate_kl = (tensors["old_log_probability"] - log_probability).mean()
+                # Measure KL after the optimizer step.  The old implementation
+                # checked logits computed before that step, allowing a noisy
+                # minibatch to overshoot the trust region by up to an epoch.
+                post_logits, _ = model(
+                    tensors["tokens"],
+                    tensors["types"],
+                    tensors["attention"],
+                    tensors["action_mask"],
+                )
+                post_distribution = torch.distributions.Categorical(
+                    logits=post_logits.float()
+                )
+                post_log_probability = (
+                    post_distribution.log_prob(tensors["actions"]) * policy_slot_mask
+                ).sum(dim=-1) / normalizer
+                approximate_kl = (
+                    tensors["old_log_probability"] - post_log_probability
+                ).mean()
             totals["policy_loss"] += float(policy_loss.item())
             totals["value_loss"] += float(value_loss.item())
             totals["entropy"] += float(entropy.item())
             totals["kl"] += float(approximate_kl.item())
+            totals["reference_kl"] += float(reference_kl.item())
             updates += 1
-            if updates >= 2 and float(approximate_kl.item()) > target_kl:
+            max_kl = max(max_kl, float(approximate_kl.item()))
+            if float(approximate_kl.item()) > target_kl:
                 stopped_early = True
                 break
         if stopped_early:
             break
-    return {key: value / max(1, updates) for key, value in totals.items()}
+    result = {key: value / max(1, updates) for key, value in totals.items()}
+    result["kl_max"] = max_kl
+    result["kl_early_stop"] = 1.0 if stopped_early else 0.0
+    result["update_steps"] = float(updates)
+    return result
 
 
 def _write_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -416,6 +492,10 @@ def run_native_self_play(
         lr=float(training.get("lr", 3e-4)),
         weight_decay=float(native.get("weight_decay", 0.01)),
     )
+    reference_model: Any | None = None
+    reference_coeff = float(native.get("bc_anchor_coeff", 0.0))
+    if reference_coeff < 0:
+        raise ValueError("native.bc_anchor_coeff must be non-negative")
     snapshots = [_cpu_state_dict(model)]
     snapshot_stats: list[dict[str, float]] = [{"games": 0.0, "wins": 0.0}]
     promotion_outcomes: list[float] = []
@@ -427,6 +507,10 @@ def run_native_self_play(
             raise ValueError("unsupported native PPO checkpoint")
         model.load_state_dict(payload["model"])
         optimizer.load_state_dict(payload["optimizer"])
+        # A recovery config is allowed to lower the step size; otherwise a
+        # checkpoint silently restores the unstable optimizer learning rate.
+        for parameter_group in optimizer.param_groups:
+            parameter_group["lr"] = float(training.get("lr", 3e-4))
         snapshots = payload.get("snapshots", snapshots)
         snapshot_stats = payload.get("snapshot_stats", snapshot_stats)
         promotion_outcomes = [float(value) for value in payload.get("promotion_outcomes", [])]
@@ -440,6 +524,12 @@ def run_native_self_play(
             raise ValueError("unsupported behavior-cloning checkpoint")
         model.load_state_dict(payload["state_dict"], strict=True)
         snapshots = [_cpu_state_dict(model)]
+        if reference_coeff:
+            reference_model = deepcopy(model).eval()
+            for parameter in reference_model.parameters():
+                parameter.requires_grad_(False)
+    elif reference_coeff:
+        raise ValueError("native.bc_anchor_coeff requires --bc-checkpoint")
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -532,6 +622,8 @@ def run_native_self_play(
             entropy_coeff=float(native.get("entropy_coeff", 0.002)),
             grad_clip=float(native.get("grad_clip", 1.0)),
             target_kl=float(native.get("target_kl", 0.03)),
+            reference_model=reference_model,
+            reference_coeff=reference_coeff,
         )
         promotion_interval = int(self_play.get("promotion_interval", 5))
         pool_size = int(self_play.get("checkpoint_slots", 4))
@@ -596,7 +688,7 @@ def run_native_self_play(
             "pool_size": len(snapshots),
             "device": device.type,
             "cuda_peak_gib": torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0.0,
-            "kl_early_stop": bool(update_metrics["kl"] > float(native.get("target_kl", 0.03))),
+            "kl_early_stop": bool(update_metrics.pop("kl_early_stop")),
             **update_metrics,
         }
         history.append(metrics)
