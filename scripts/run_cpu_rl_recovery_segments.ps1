@@ -140,6 +140,27 @@ function Invoke-CollapseIntervention {
     } | ConvertTo-Json -Depth 10 -Compress | Add-Content -Encoding UTF8 $interventionPath
 }
 
+function Invoke-PreflightCollapseAssessment {
+    $config = Get-Content -LiteralPath $runtimeConfigPath -Raw | ConvertFrom-Json
+    $window = Get-RecentMetricWindow -Count ([int]$config.cpu_recovery.collapse_monitor.window_iterations) -AfterIteration $lastInterventionIteration
+    $assessment = Test-PolicyCollapse -Metrics $window
+    if (-not $assessment.detected) { return }
+    $maxInterventions = [int]$config.cpu_recovery.max_interventions
+    if ($interventionCount -ge $maxInterventions) {
+        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        $state.status = "paused_policy_collapse"
+        $state | Add-Member -NotePropertyName collapse_assessment -NotePropertyValue $assessment -Force
+        $state | Add-Member -NotePropertyName updated_at -NotePropertyValue (Get-Date).ToString("o") -Force
+        $state | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $statePath
+        exit 2
+    }
+    $script:interventionCount += 1
+    $script:lastInterventionIteration = [int]$window[-1].iteration
+    Invoke-CollapseIntervention -Number $script:interventionCount -Assessment $assessment
+}
+
+Invoke-PreflightCollapseAssessment
+
 while ($completed -lt $Iterations) {
     $segment = [Math]::Min($SegmentIterations, $Iterations - $completed)
     $latestPath = Join-Path $resolvedOutput "latest.json"

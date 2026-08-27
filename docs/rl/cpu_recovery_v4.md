@@ -17,7 +17,7 @@ instead of inadvertently collecting two games.
 The supervisor writes an immutable copy of the source config as
 `runtime_config.json` in the artifact directory. It examines consecutive
 post-intervention windows of three completed iterations. A collapse requires all
-of: mean learner win rate at most 2%, mean score difference at most -250, and
+of: mean learner win rate at most 2%, mean score difference at most -100, and
 either at least two KL early-stops, mean KL above 1.5 times target, or mean
 entropy below 0.03. A one-game result cannot independently trigger a reward or
 policy change.

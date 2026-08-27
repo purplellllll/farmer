@@ -9,7 +9,7 @@
   "self_play": {"checkpoint_slots": 4, "promotion_interval": 5, "promotion_min_games": 16, "promotion_win_rate": 0.55, "promotion_scripted_min_games": 24, "promotion_scripted_win_rate": 0.5, "pfsp_power": 1.0, "seat_swap": true, "selection_metric": "paired_seed_win_rate"},
   "cpu_recovery": {
     "max_interventions": 2,
-    "collapse_monitor": {"window_iterations": 3, "max_window_win_rate": 0.02, "max_mean_score_difference": -250.0, "min_kl_early_stops": 2, "kl_multiple": 1.5, "min_mean_entropy": 0.03},
+    "collapse_monitor": {"window_iterations": 3, "max_window_win_rate": 0.02, "max_mean_score_difference": -100.0, "min_kl_early_stops": 2, "kl_multiple": 1.5, "min_mean_entropy": 0.03},
     "recovery": {"lr_multiplier": 0.5, "min_lr": 0.000002, "clip_multiplier": 0.7, "min_clip_param": 0.05, "terminal_score_increment": 0.1, "max_terminal_score_coeff": 0.5, "update_epochs": 1, "entropy_multiplier": 1.75, "max_entropy_coeff": 0.02, "target_kl": 0.01, "min_scripted_opponent_probability": 0.9}
   }
 }
