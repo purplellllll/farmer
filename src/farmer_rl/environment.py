@@ -198,3 +198,16 @@ class KaggricultureEnv:
         if self._env is None:
             raise RuntimeError("environment has not been reset")
         return self._env
+
+    def close(self) -> None:
+        """Release the official environment and its retained step history.
+
+        The Kaggle environment keeps every step for replay rendering.  Long
+        self-play jobs create a fresh environment per game, so retaining the
+        last official object until cyclic GC runs can grow a CPU worker by
+        several GiB.  Training records are already detached plain values and
+        remain valid after these references are cleared.
+        """
+
+        self._last_observations.clear()
+        self._env = None

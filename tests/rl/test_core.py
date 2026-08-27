@@ -121,6 +121,15 @@ class EnvironmentTests(unittest.TestCase):
         with self.assertRaises(InvalidActionError):
             env.step({0: pass_action(1), 1: pass_action()})
 
+    def test_close_releases_official_environment_history(self):
+        env = KaggricultureEnv(make_fn=fake_make)
+        env.reset()
+        self.assertIsInstance(env.raw_environment, FakeOfficialEnvironment)
+        env.close()
+        self.assertEqual(env._last_observations, {})
+        with self.assertRaises(RuntimeError):
+            _ = env.raw_environment
+
 
 class TrajectoryTests(unittest.TestCase):
     def _transition(self, seat: int, step: int = 0) -> Transition:
@@ -325,6 +334,7 @@ class OpponentAndConfigTests(unittest.TestCase):
             "ppo.json",
             "local_4060.json",
             "local_4060_recovery_v2.json",
+            "cpu_recovery_v3.json",
             "cpu_v2.json",
             "cpu_v2_smoke.json",
             "population.json",

@@ -259,6 +259,11 @@ def _collect_episode(
     if records:
         records[-1]["reward"] += terminal_reward
 
+    # The official Kaggle environment retains its full replay history.  PPO
+    # only needs the detached encoded records above, so release the environment
+    # before the optimizer batch is assembled.
+    env.close()
+
     advantage = 0.0
     next_value = 0.0
     for record in reversed(records):

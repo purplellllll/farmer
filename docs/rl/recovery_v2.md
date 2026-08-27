@@ -62,3 +62,21 @@ PASS streak 接近整局。
 
 CPU 后续不应继续 24-step PPO。可选路径是：先扩大并修复 BC teacher，再在独占内存时
 使用至少 144 step；或者只让 CPU 负责离线 BC/评测，把在线 rollout 留给 GPU。
+
+## CPU recovery v3
+
+CPU 新训练不再恢复 24-step optimizer，也不使用动作覆盖导向的弱课程 BC；它从
+`starter_bc_v5.pt` 干净启动，并复用 recovery v2 的前缀条件动作、终局分差辅助奖励、
+脚本基线晋升门槛和最多 8 hand 限制。每局使用 144 step，每轮收集 2 局并交换座位。
+
+官方环境对象会保留完整 replay history。训练记录已经转换为独立 NumPy 数组后，runner
+会显式释放环境引用；后台 supervisor 仍每轮重启一次 worker 并从最新 checkpoint
+恢复，以回收 PyTorch/环境分配器未归还给系统的内存。PPO minibatch 从 32 降至 4；
+worker 私有内存超过 4 GiB 时 supervisor 会触发保护性停止。启动 50 轮：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start_cpu_rl_recovery_v3.ps1 `
+  -Iterations 50 -SegmentIterations 1
+```
+
+独立输出目录为 `artifacts/cpu-rl-recovery-v3`，不会覆盖旧 CPU 或 GPU checkpoint。
