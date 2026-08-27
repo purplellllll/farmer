@@ -648,6 +648,23 @@ def run_native_self_play(
             float(value) for value in payload.get("scripted_promotion_outcomes", [])
         ]
         start_iteration = int(payload.get("iteration", 0))
+        if reference_coeff:
+            reference_state = payload.get("reference_model")
+            if reference_state is None:
+                if not bc_checkpoint:
+                    raise ValueError(
+                        "resuming with native.bc_anchor_coeff requires a checkpoint "
+                        "containing reference_model or --bc-checkpoint"
+                    )
+                bc_payload = torch.load(bc_checkpoint, map_location="cpu", weights_only=False)
+                if bc_payload.get("format") != "farmer-rl-bc/v1":
+                    raise ValueError("unsupported behavior-cloning checkpoint")
+                reference_state = bc_payload["state_dict"]
+            reference_model = build_actor_critic(model_config).to(device)
+            reference_model.load_state_dict(reference_state, strict=True)
+            reference_model.eval()
+            for parameter in reference_model.parameters():
+                parameter.requires_grad_(False)
     elif bc_checkpoint:
         payload = torch.load(bc_checkpoint, map_location="cpu", weights_only=False)
         if payload.get("format") != "farmer-rl-bc/v1":
@@ -848,6 +865,9 @@ def run_native_self_play(
                     "snapshot_stats": snapshot_stats,
                     "promotion_outcomes": promotion_outcomes,
                     "scripted_promotion_outcomes": scripted_promotion_outcomes,
+                    "reference_model": (
+                        _cpu_state_dict(reference_model) if reference_model is not None else None
+                    ),
                 },
                 checkpoint_path,
             )

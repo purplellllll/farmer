@@ -33,7 +33,9 @@
     "gae_lambda": 0.95,
     "clip_param": 0.05,
     "terminal_score_coeff": 0.25,
-    "terminal_score_scale": 1000.0
+    "terminal_score_scale": 1000.0,
+    "shaping_profile": "production_cycle_v2",
+    "shaping_scale": 7000.0
   },
   "native": {
     "device": "cuda",
