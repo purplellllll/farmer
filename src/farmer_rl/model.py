@@ -31,6 +31,11 @@ class ModelConfig:
     layers: int = 8
     dim_feedforward: int = 1024
     dropout: float = 0.1
+    # PPG highlights destructive interference when policy and value losses
+    # share a representation.  Keep one large residual Transformer, but allow
+    # the critic gradient reaching that shared encoder to be attenuated.  The
+    # critic head itself still receives its full gradient.
+    critic_encoder_gradient_scale: float = 1.0
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ModelConfig":
@@ -47,6 +52,8 @@ def build_actor_critic(config: ModelConfig) -> Any:
         def __init__(self) -> None:
             super().__init__()
             self.config = config
+            if not 0.0 <= config.critic_encoder_gradient_scale <= 1.0:
+                raise ValueError("critic_encoder_gradient_scale must be in [0, 1]")
             self.input_projection = nn.Linear(config.feature_dim, config.d_model)
             self.type_embedding = nn.Embedding(len(TOKEN_TYPES), config.d_model)
             self.position_embedding = nn.Parameter(torch.zeros(1, config.max_tokens, config.d_model))
@@ -96,7 +103,13 @@ def build_actor_critic(config: ModelConfig) -> Any:
                 if action_mask.ndim == 2:
                     action_mask = action_mask.reshape(batch, self.config.slots, self.config.candidate_capacity)
                 logits = logits.masked_fill(action_mask <= 0, torch.finfo(logits.dtype).min)
-            value = self.critic(pooled).squeeze(-1)
+            # Forward values are unchanged, while the gradient from the value
+            # loss into the shared Transformer is scaled independently from
+            # the critic head gradient.  This is checkpoint-compatible because
+            # it introduces no parameters.
+            scale = self.config.critic_encoder_gradient_scale
+            critic_pooled = pooled.detach() + scale * (pooled - pooled.detach())
+            value = self.critic(critic_pooled).squeeze(-1)
             return logits, value
 
     return ResidualTransformerActorCritic()

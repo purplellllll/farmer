@@ -42,6 +42,11 @@ if ($null -eq $runtimeConfig.training.shaping_scale) {
     $runtimeConfig.training | Add-Member -NotePropertyName shaping_scale -NotePropertyValue $sourceConfig.training.shaping_scale -Force
     $runtimeChanged = $true
 }
+if ($null -eq $runtimeConfig.training.shaping_coefficient) {
+    $coefficient = if ($null -eq $sourceConfig.training.shaping_coefficient) { 1.0 } else { [double]$sourceConfig.training.shaping_coefficient }
+    $runtimeConfig.training | Add-Member -NotePropertyName shaping_coefficient -NotePropertyValue $coefficient -Force
+    $runtimeChanged = $true
+}
 if ($runtimeChanged) {
     $runtimeConfig | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $runtimeConfigPath
 }
@@ -187,6 +192,7 @@ function Invoke-RewardRedesign {
     $before = [ordered]@{
         shaping_profile = $config.training.shaping_profile
         shaping_scale = $config.training.shaping_scale
+        shaping_coefficient = $config.training.shaping_coefficient
         lr = [double]$config.training.lr
         clip_param = [double]$config.training.clip_param
         terminal_score_coeff = [double]$config.training.terminal_score_coeff
@@ -197,6 +203,8 @@ function Invoke-RewardRedesign {
     Copy-Item -LiteralPath $runtimeConfigPath -Destination (Join-Path $resolvedOutput ("runtime_config.before_reward_redesign_{0:D2}.json" -f $Number))
     $config.training | Add-Member -NotePropertyName shaping_profile -NotePropertyValue ([string]$profile.shaping_profile) -Force
     $config.training | Add-Member -NotePropertyName shaping_scale -NotePropertyValue ([double]$profile.shaping_scale) -Force
+    $profileCoefficient = if ($null -eq $profile.shaping_coefficient) { [double]$config.training.shaping_coefficient } else { [double]$profile.shaping_coefficient }
+    $config.training | Add-Member -NotePropertyName shaping_coefficient -NotePropertyValue $profileCoefficient -Force
     $config.training.lr = [double]$profile.lr
     $config.training.clip_param = [double]$profile.clip_param
     $config.training.terminal_score_coeff = [double]$profile.terminal_score_coeff
@@ -208,6 +216,7 @@ function Invoke-RewardRedesign {
     $after = [ordered]@{
         shaping_profile = [string]$config.training.shaping_profile
         shaping_scale = [double]$config.training.shaping_scale
+        shaping_coefficient = [double]$config.training.shaping_coefficient
         lr = [double]$config.training.lr
         clip_param = [double]$config.training.clip_param
         terminal_score_coeff = [double]$config.training.terminal_score_coeff
@@ -281,9 +290,10 @@ while ($completed -lt $Iterations) {
     )
     if ($resumePath) {
         $arguments += @("--resume", $resumePath)
-    } else {
-        $arguments += @("--bc-checkpoint", $bcPath)
     }
+    # Always provide the BC seed.  New runs initialize from it, and legacy
+    # resume checkpoints can use it to reconstruct a missing frozen anchor.
+    $arguments += @("--bc-checkpoint", $bcPath)
 
     $segmentNumber = [int]($completed / $SegmentIterations) + 1
     $stdout = Join-Path $logDir ("segment_{0:D3}.stdout.log" -f $segmentNumber)

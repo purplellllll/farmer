@@ -34,6 +34,35 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(tuple(value.shape), (2,))
         self.assertTrue(torch.all(logits[:, 0, 4] < -1e20))
 
+    def test_critic_encoder_gradient_can_be_attenuated(self):
+        import torch
+
+        def encoder_grad(scale: float) -> float:
+            torch.manual_seed(7)
+            config = ModelConfig(
+                feature_dim=FEATURE_DIM,
+                max_tokens=4,
+                slots=1,
+                candidate_capacity=2,
+                d_model=8,
+                nhead=2,
+                layers=1,
+                dim_feedforward=16,
+                dropout=0.0,
+                critic_encoder_gradient_scale=scale,
+            )
+            model = build_actor_critic(config)
+            values = torch.randn(2, 4, FEATURE_DIM)
+            types = torch.zeros(2, 4, dtype=torch.long)
+            attention = torch.ones(2, 4)
+            _, value = model(values, types, attention)
+            value.sum().backward()
+            gradient = model.input_projection.weight.grad
+            return 0.0 if gradient is None else float(gradient.abs().sum())
+
+        self.assertGreater(encoder_grad(1.0), 0.0)
+        self.assertEqual(encoder_grad(0.0), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

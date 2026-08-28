@@ -342,6 +342,31 @@ class OpponentAndConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _potential(observation(0), 0, scale=0)
 
+    def test_cashflow_shaping_rewards_liquidation_stages(self):
+        seed_state = observation(0)
+        seed_state["farms"][0]["money"] = seed_state["farms"][1]["money"]
+        seed_state["farms"][0]["tiles"][0][0] = None
+        seed_state["private"]["shed"] = {}
+        seed_state["private"]["seeds"] = {"WHEAT": 1}
+        seed_state["market"]["prices"]["WHEAT"] = 25
+
+        harvested_state = deepcopy(seed_state)
+        harvested_state["private"]["seeds"] = {}
+        harvested_state["private"]["shed"] = {"WHEAT": 1}
+
+        sold_state = deepcopy(harvested_state)
+        sold_state["private"]["shed"] = {}
+        sold_state["farms"][0]["money"] += 25
+
+        self.assertGreater(
+            _potential(harvested_state, 0, profile="cashflow_cycle_v4"),
+            _potential(seed_state, 0, profile="cashflow_cycle_v4"),
+        )
+        self.assertGreater(
+            _potential(sold_state, 0, profile="cashflow_cycle_v4"),
+            _potential(harvested_state, 0, profile="cashflow_cycle_v4"),
+        )
+
     def test_terminal_reward_preserves_win_order_and_dense_loss_margin(self):
         close_outcome, close_reward = _terminal_reward(
             -100, score_coefficient=0.25, score_scale=1000
@@ -378,6 +403,7 @@ class OpponentAndConfigTests(unittest.TestCase):
             "local_4060_recovery_v5.json",
             "cpu_recovery_v3.json",
             "cpu_recovery_v5.json",
+            "cpu_recovery_v6.json",
             "cpu_v2.json",
             "cpu_v2_smoke.json",
             "population.json",

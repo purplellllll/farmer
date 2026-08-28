@@ -35,6 +35,9 @@ _CROP_FIRST_YIELD_DAYS = {
 _ANIMAL_PRODUCTS = {"GOOSE": "EGG", "COW": "MILK", "SHEEP": "WOOL"}
 _SHAPING_PROFILES: dict[str, dict[str, float]] = {
     "liquidation_v1": {
+        "seed_inventory": 1.0,
+        "product_inventory": 1.0,
+        "carried_animal": 1.0,
         "crop_capital": 0.0,
         "crop_progress": 0.0,
         "crop_yield": 0.0,
@@ -45,6 +48,9 @@ _SHAPING_PROFILES: dict[str, dict[str, float]] = {
     # Preserve invested capital and supply intermediate credit for completing
     # the plant/water/grow and place/feed/care cycles.
     "production_cycle_v2": {
+        "seed_inventory": 1.0,
+        "product_inventory": 1.0,
+        "carried_animal": 1.0,
         "crop_capital": 1.0,
         "crop_progress": 0.25,
         "crop_yield": 0.60,
@@ -55,12 +61,43 @@ _SHAPING_PROFILES: dict[str, dict[str, float]] = {
     # If production-cycle credit still collapses, move credit closer to output
     # that can actually be harvested and sold while retaining planted capital.
     "harvest_market_v3": {
+        "seed_inventory": 1.0,
+        "product_inventory": 1.0,
+        "carried_animal": 1.0,
         "crop_capital": 0.85,
         "crop_progress": 0.10,
         "crop_yield": 1.0,
         "structure": 2.0,
         "animal_capital": 0.90,
         "animal_yield": 1.0,
+    },
+    # Asset stages are deliberately discounted by distance from cash.  This
+    # supplies positive credit for completing harvest/drop/sell instead of
+    # treating a bought seed, a growing crop, shed inventory, and cash as
+    # interchangeable.  The transition reward remains potential-based.
+    "cashflow_cycle_v4": {
+        "seed_inventory": 0.70,
+        "product_inventory": 0.80,
+        "carried_animal": 0.70,
+        "crop_capital": 0.60,
+        "crop_progress": 0.10,
+        "crop_yield": 0.35,
+        "structure": 1.0,
+        "animal_capital": 0.65,
+        "animal_yield": 0.50,
+    },
+    # Stronger fallback if the first cash-flow profile still learns hoarding:
+    # realized cash dominates every less-liquid production stage.
+    "realized_cash_v5": {
+        "seed_inventory": 0.50,
+        "product_inventory": 0.65,
+        "carried_animal": 0.55,
+        "crop_capital": 0.40,
+        "crop_progress": 0.05,
+        "crop_yield": 0.20,
+        "structure": 0.50,
+        "animal_capital": 0.50,
+        "animal_yield": 0.30,
     },
 }
 
@@ -216,19 +253,27 @@ def _potential(
     own = farms[learner_seat]
     private = observation.get("private", {}) or {}
     market_prices = ((observation.get("market", {}) or {}).get("prices", {}) or {})
+    weights = _SHAPING_PROFILES[profile]
     value = float(own.get("money", 0.0) or 0.0)
     for crop, count in (private.get("seeds", {}) or {}).items():
-        value += SEED_COSTS.get(str(crop), 0) * max(0, int(count or 0))
+        value += (
+            weights["seed_inventory"]
+            * SEED_COSTS.get(str(crop), 0)
+            * max(0, int(count or 0))
+        )
     inventories = [private.get("shed", {}) or {}, *(private.get("inventories", []) or [])]
     for inventory in inventories:
         if not isinstance(inventory, Mapping):
             continue
         for item, count in inventory.items():
-            unit_value = ANIMAL_COSTS.get(
-                str(item), max(0, int(market_prices.get(str(item), 0) or 0))
-            )
-            value += unit_value * max(0, int(count or 0))
-    weights = _SHAPING_PROFILES[profile]
+            item_name = str(item)
+            if item_name in ANIMAL_COSTS:
+                unit_value = ANIMAL_COSTS[item_name]
+                liquidity_weight = weights["carried_animal"]
+            else:
+                unit_value = max(0, int(market_prices.get(item_name, 0) or 0))
+                liquidity_weight = weights["product_inventory"]
+            value += liquidity_weight * unit_value * max(0, int(count or 0))
     day = max(0, int(observation.get("day", 0) or 0))
     value += _productive_board_value(
         own,
@@ -297,6 +342,7 @@ def _collect_episode(
     terminal_score_scale: float,
     shaping_profile: str,
     shaping_scale: float,
+    shaping_coefficient: float,
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     env = KaggricultureEnv(configuration={"episodeSteps": episode_steps})
     observations = env.reset(seed=seed)
@@ -363,7 +409,7 @@ def _collect_episode(
                 scale=shaping_scale,
             )
         )
-        reward = gamma * next_potential - current_potential
+        reward = shaping_coefficient * (gamma * next_potential - current_potential)
         final_rewards = result.rewards
         records.append(
             {
@@ -693,8 +739,11 @@ def run_native_self_play(
     terminal_score_scale = float(training.get("terminal_score_scale", 1000.0))
     shaping_profile = str(training.get("shaping_profile", "liquidation_v1"))
     shaping_scale = float(training.get("shaping_scale", 10_000.0))
+    shaping_coefficient = float(training.get("shaping_coefficient", 1.0))
     if terminal_score_scale <= 0:
         raise ValueError("training.terminal_score_scale must be positive")
+    if shaping_coefficient < 0:
+        raise ValueError("training.shaping_coefficient must be non-negative")
     # Validate before starting an expensive rollout rather than at step one.
     _potential({}, 0, profile=shaping_profile, scale=shaping_scale)
     tokenizer = ObservationTokenizer(max_tokens=model_config.max_tokens)
@@ -747,6 +796,7 @@ def run_native_self_play(
                 terminal_score_scale=terminal_score_scale,
                 shaping_profile=shaping_profile,
                 shaping_scale=shaping_scale,
+                shaping_coefficient=shaping_coefficient,
             )
             records.extend(episode_records)
             outcome = float(episode_metrics["outcome"])
@@ -844,6 +894,7 @@ def run_native_self_play(
             "kl_early_stop": bool(update_metrics.pop("kl_early_stop")),
             "shaping_profile": shaping_profile,
             "shaping_scale": shaping_scale,
+            "shaping_coefficient": shaping_coefficient,
             **update_metrics,
         }
         history.append(metrics)
