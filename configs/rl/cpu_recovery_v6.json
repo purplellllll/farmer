@@ -1,0 +1,47 @@
+{
+  "schema_version": "farmer-rl-training/v4",
+  "environment": {"configuration": {"episodeSteps": 144}, "debug": false},
+  "actions": {"max_hands": 16, "max_orders": 10, "candidate_capacity": 64, "market_decoder": "prefix_conditioned_resource_masks_v3"},
+  "model": {"feature_dim": 32, "max_tokens": 320, "slots": 27, "candidate_capacity": 64, "d_model": 256, "nhead": 8, "layers": 8, "dim_feedforward": 1024, "dropout": 0.1, "critic_encoder_gradient_scale": 0.25},
+  "bc": {"lr": 0.00003, "epochs": 16},
+  "training": {"lr": 0.000001, "gamma": 0.999, "gae_lambda": 0.98, "clip_param": 0.05, "terminal_score_coeff": 0.4, "terminal_score_scale": 1000.0, "shaping_profile": "cashflow_cycle_v4", "shaping_scale": 3000.0, "shaping_coefficient": 2.0},
+  "native": {
+    "device": "cpu",
+    "cpu_threads": 4,
+    "seed": 20260830,
+    "train_batch_steps": 286,
+    "minibatch_size": 8,
+    "update_epochs": 2,
+    "entropy_coeff": 0.004,
+    "value_coeff": 0.2,
+    "grad_clip": 0.25,
+    "target_kl": 0.005,
+    "bc_anchor_coeff": 0.5,
+    "scripted_opponent_probability": 1.0,
+    "weight_decay": 0.01,
+    "checkpoint_interval": 1,
+    "keep_checkpoints": 12
+  },
+  "self_play": {
+    "checkpoint_slots": 4,
+    "promotion_interval": 5,
+    "promotion_min_games": 16,
+    "promotion_win_rate": 0.55,
+    "promotion_scripted_min_games": 24,
+    "promotion_scripted_win_rate": 0.5,
+    "pfsp_power": 1.0,
+    "seat_swap": true,
+    "selection_metric": "paired_seed_win_rate"
+  },
+  "cpu_recovery": {
+    "max_interventions": 1,
+    "collapse_monitor": {"window_iterations": 4, "max_window_win_rate": 0.02, "max_mean_score_difference": -100.0, "min_kl_early_stops": 2, "kl_multiple": 1.5, "min_mean_entropy": 0.02},
+    "recovery": {"lr_multiplier": 0.75, "min_lr": 0.0000005, "clip_multiplier": 0.8, "min_clip_param": 0.03, "terminal_score_increment": 0.05, "max_terminal_score_coeff": 0.5, "update_epochs": 2, "entropy_multiplier": 1.5, "max_entropy_coeff": 0.012, "target_kl": 0.004, "min_scripted_opponent_probability": 1.0},
+    "reward_redesign": {
+      "profiles": [
+        {"shaping_profile": "realized_cash_v5", "shaping_scale": 2500.0, "shaping_coefficient": 2.5, "lr": 0.00000075, "clip_param": 0.04, "terminal_score_coeff": 0.45, "update_epochs": 2, "entropy_coeff": 0.006, "target_kl": 0.004, "scripted_opponent_probability": 1.0},
+        {"shaping_profile": "cashflow_cycle_v4", "shaping_scale": 2200.0, "shaping_coefficient": 3.0, "lr": 0.0000005, "clip_param": 0.03, "terminal_score_coeff": 0.5, "update_epochs": 2, "entropy_coeff": 0.009, "target_kl": 0.0035, "scripted_opponent_probability": 1.0}
+      ]
+    }
+  }
+}

@@ -12,6 +12,7 @@
 - `sources.md`：官方规则、模型论文、公开策略仓库、许可证与固定版本。
 - `strategy_catalog.md`：生产物流、市场、专家路由、恢复、终局、自博弈六类策略及标签。
 - `architecture.md`：模型、轨迹、动作掩码、BC→PPO 和已知工程缺口。
+- `cpu_recovery_v6.md`：v5 日志诊断、现金流势函数、Actor–Critic 隔离参数与 CPU 重训入口。
 - `configs/rl/data_manifest.schema.json`：任何训练集进入流水线前必须满足的 manifest。
 - `src/farmer_rl`：无外部依赖的核心接口，以及按需加载的 PyTorch/RLlib 训练入口。
 
