@@ -1,6 +1,6 @@
 # Farmer project handoff for the next Codex session
 
-Last refreshed: **2026-08-28 10:15 Asia/Shanghai**
+Last refreshed: **2026-08-28 10:19 Asia/Shanghai**
 
 Workspace: `F:\Kaggle\farm\farmer`
 
@@ -129,12 +129,14 @@ At handoff:
 
 - status `running`, target 80 iterations;
 - supervisor PID 43508;
-- iteration 1 completed; iteration 2 worker PID 21148 was active;
+- iterations 1–2 completed; iteration 3 worker PID 43332 was active;
 - active profile `cashflow_cycle_v4`;
-- worker memory observed around 1.78 GiB at the snapshot;
+- worker memory observed around 1.94 GiB at the snapshot;
 - iteration 1: 286 steps, two scripted losses, mean score difference -317;
-- iteration 1 wall time 382.46 seconds, so 80 iterations are roughly 8.5
-  hours under the current simultaneous GPU load;
+- iteration 2: 286 steps, two scripted losses, mean score difference -300;
+- iteration wall time improved from 382.46 seconds in the warm-up iteration to
+  232.11 seconds in iteration 2; expect roughly 6–8.5 hours for 80 iterations
+  while the GPU job is also running;
 - KL `6.88e-6`, max KL `4.94e-4`, entropy `0.01922`, no early stop;
 - reference KL `5.77e-8`, confirming that the BC anchor is active.
 
@@ -154,9 +156,9 @@ Latest checkpoint manifest: `artifacts/local-4060-recovery-v5/latest.json`
 At handoff:
 
 - launcher PID 28556, worker PID 42544, both active;
-- latest completed iteration 295; the current run targets iteration 600;
-- iteration 295: overall win rate 0.21875, but scripted win rate 0/24;
-- snapshot win rate 0.875 and mean score difference -176.47;
+- latest completed iteration 296; the current run targets iteration 600;
+- iteration 296: overall win rate 0.046875, but scripted win rate 0/22;
+- snapshot win rate 0.15 and mean score difference -214.53;
 - last-five mean score difference about -201.28 and last-five scripted win
   rate 0;
 - CUDA peak allocated memory reported by the trainer: about 1.835 GiB;
@@ -167,7 +169,8 @@ paired-seat evaluation also improve.
 
 ### Resource warning
 
-At 10:15 the machine had only **0.93 GiB free physical RAM out of 15.78 GiB**.
+During handoff the machine fluctuated between **0.93 and 1.46 GiB free physical
+RAM out of 15.78 GiB**.
 Do not start another trainer, evaluator, notebook or large checkpoint load while
 both jobs are alive.  The CPU supervisor already uses `BelowNormal` priority
 and a 2.10 GiB worker guard.  If it hits the guard again, reduce minibatch size
