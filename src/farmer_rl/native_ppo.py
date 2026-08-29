@@ -23,6 +23,85 @@ from .model import ModelConfig, build_actor_critic
 from .tokenizer import ObservationTokenizer
 
 
+# Kept local rather than importing the official environment internals so a
+# training checkpoint remains usable with a packaged Kaggriculture agent.
+_CROP_FIRST_YIELD_DAYS = {
+    "WHEAT": 2,
+    "CARROT": 2,
+    "TOMATO": 8,
+    "STRAWBERRY": 10,
+    "MELON": 10,
+}
+_ANIMAL_PRODUCTS = {"GOOSE": "EGG", "COW": "MILK", "SHEEP": "WOOL"}
+_SHAPING_PROFILES: dict[str, dict[str, float]] = {
+    "liquidation_v1": {
+        "seed_inventory": 1.0,
+        "product_inventory": 1.0,
+        "carried_animal": 1.0,
+        "crop_capital": 0.0,
+        "crop_progress": 0.0,
+        "crop_yield": 0.0,
+        "structure": 0.0,
+        "animal_capital": 0.0,
+        "animal_yield": 0.0,
+    },
+    # Preserve invested capital and supply intermediate credit for completing
+    # the plant/water/grow and place/feed/care cycles.
+    "production_cycle_v2": {
+        "seed_inventory": 1.0,
+        "product_inventory": 1.0,
+        "carried_animal": 1.0,
+        "crop_capital": 1.0,
+        "crop_progress": 0.25,
+        "crop_yield": 0.60,
+        "structure": 5.0,
+        "animal_capital": 1.0,
+        "animal_yield": 0.65,
+    },
+    # If production-cycle credit still collapses, move credit closer to output
+    # that can actually be harvested and sold while retaining planted capital.
+    "harvest_market_v3": {
+        "seed_inventory": 1.0,
+        "product_inventory": 1.0,
+        "carried_animal": 1.0,
+        "crop_capital": 0.85,
+        "crop_progress": 0.10,
+        "crop_yield": 1.0,
+        "structure": 2.0,
+        "animal_capital": 0.90,
+        "animal_yield": 1.0,
+    },
+    # Asset stages are deliberately discounted by distance from cash.  This
+    # supplies positive credit for completing harvest/drop/sell instead of
+    # treating a bought seed, a growing crop, shed inventory, and cash as
+    # interchangeable.  The transition reward remains potential-based.
+    "cashflow_cycle_v4": {
+        "seed_inventory": 0.70,
+        "product_inventory": 0.80,
+        "carried_animal": 0.70,
+        "crop_capital": 0.60,
+        "crop_progress": 0.10,
+        "crop_yield": 0.35,
+        "structure": 1.0,
+        "animal_capital": 0.65,
+        "animal_yield": 0.50,
+    },
+    # Stronger fallback if the first cash-flow profile still learns hoarding:
+    # realized cash dominates every less-liquid production stage.
+    "realized_cash_v5": {
+        "seed_inventory": 0.50,
+        "product_inventory": 0.65,
+        "carried_animal": 0.55,
+        "crop_capital": 0.40,
+        "crop_progress": 0.05,
+        "crop_yield": 0.20,
+        "structure": 0.50,
+        "animal_capital": 0.50,
+        "animal_yield": 0.30,
+    },
+}
+
+
 def _torch() -> Any:
     import torch
 
@@ -103,8 +182,70 @@ def _sample(
     )
 
 
-def _potential(observation: Mapping[str, Any], learner_seat: int) -> float:
-    """Bounded public/own-private liquidation proxy used only for shaping."""
+def _productive_board_value(
+    farm: Mapping[str, Any],
+    *,
+    day: int,
+    market_prices: Mapping[str, Any],
+    weights: Mapping[str, float],
+) -> float:
+    value = 0.0
+    for row in farm.get("tiles", []) or []:
+        if not isinstance(row, list):
+            continue
+        for tile in row:
+            if not isinstance(tile, Mapping):
+                continue
+            kind = str(tile.get("kind", ""))
+            if kind == "PLANT":
+                crop = str(tile.get("crop", ""))
+                seed_value = float(SEED_COSTS.get(crop, 0))
+                market_value = float(max(0, int(market_prices.get(crop, 0) or 0)))
+                planted_day = tile.get("planted_day", day)
+                age = max(0, day - int(day if planted_day is None else planted_day))
+                first_yield = max(1, _CROP_FIRST_YIELD_DAYS.get(crop, 1))
+                progress = min(1.0, age / first_yield)
+                # Watering changes a transient flag, but the resulting growth
+                # and yield persist across the day boundary.  Health only
+                # discounts the prospective component, never planted capital.
+                missed = max(0, int(tile.get("consecutive_unwatered", 0) or 0))
+                health = 1.0 if tile.get("watered_today", False) else max(0.2, 1.0 - 0.35 * missed)
+                units = max(0, int(tile.get("yield_units", 0) or 0))
+                maturity = 0.25 + 0.75 * progress
+                value += weights["crop_capital"] * seed_value
+                value += weights["crop_progress"] * market_value * progress * health
+                value += weights["crop_yield"] * market_value * units * maturity * health
+                continue
+            if kind in {"COOP", "PASTURE"}:
+                value += weights["structure"]
+                animal = str(tile.get("animal", ""))
+                if not animal:
+                    continue
+                value += weights["animal_capital"] * float(ANIMAL_COSTS.get(animal, 0))
+                product = _ANIMAL_PRODUCTS.get(animal, "")
+                product_price = float(max(0, int(market_prices.get(product, 0) or 0)))
+                units = max(0, int(tile.get("yield_units", 0) or 0))
+                health = 1.0
+                if int(tile.get("consecutive_unfed", 0) or 0) > 0:
+                    health = 0.5
+                value += weights["animal_yield"] * product_price * units * health
+    return value
+
+
+def _potential(
+    observation: Mapping[str, Any],
+    learner_seat: int,
+    *,
+    profile: str = "liquidation_v1",
+    scale: float = 10_000.0,
+) -> float:
+    """Bounded observable asset/production proxy used only for shaping."""
+
+    if profile not in _SHAPING_PROFILES:
+        supported = ", ".join(sorted(_SHAPING_PROFILES))
+        raise ValueError(f"unsupported shaping profile {profile!r}; choose one of: {supported}")
+    if scale <= 0:
+        raise ValueError("training.shaping_scale must be positive")
 
     farms = observation.get("farms", [])
     if not isinstance(farms, list) or len(farms) != 2:
@@ -112,20 +253,58 @@ def _potential(observation: Mapping[str, Any], learner_seat: int) -> float:
     own = farms[learner_seat]
     private = observation.get("private", {}) or {}
     market_prices = ((observation.get("market", {}) or {}).get("prices", {}) or {})
+    weights = _SHAPING_PROFILES[profile]
     value = float(own.get("money", 0.0) or 0.0)
     for crop, count in (private.get("seeds", {}) or {}).items():
-        value += SEED_COSTS.get(str(crop), 0) * max(0, int(count or 0))
+        value += (
+            weights["seed_inventory"]
+            * SEED_COSTS.get(str(crop), 0)
+            * max(0, int(count or 0))
+        )
     inventories = [private.get("shed", {}) or {}, *(private.get("inventories", []) or [])]
     for inventory in inventories:
         if not isinstance(inventory, Mapping):
             continue
         for item, count in inventory.items():
-            unit_value = ANIMAL_COSTS.get(
-                str(item), max(0, int(market_prices.get(str(item), 0) or 0))
-            )
-            value += unit_value * max(0, int(count or 0))
+            item_name = str(item)
+            if item_name in ANIMAL_COSTS:
+                unit_value = ANIMAL_COSTS[item_name]
+                liquidity_weight = weights["carried_animal"]
+            else:
+                unit_value = max(0, int(market_prices.get(item_name, 0) or 0))
+                liquidity_weight = weights["product_inventory"]
+            value += liquidity_weight * unit_value * max(0, int(count or 0))
+    day = max(0, int(observation.get("day", 0) or 0))
+    value += _productive_board_value(
+        own,
+        day=day,
+        market_prices=market_prices,
+        weights=weights,
+    )
     opponent_money = float(farms[1 - learner_seat].get("money", 0.0) or 0.0)
-    return math.tanh((value - opponent_money) / 10_000.0)
+    opponent_money += _productive_board_value(
+        farms[1 - learner_seat],
+        day=day,
+        market_prices=market_prices,
+        weights=weights,
+    )
+    return math.tanh((value - opponent_money) / scale)
+
+
+def _terminal_reward(
+    score_difference: float,
+    *,
+    score_coefficient: float,
+    score_scale: float,
+) -> tuple[float, float]:
+    """Return win outcome and a bounded dense terminal training reward."""
+
+    if score_scale <= 0:
+        raise ValueError("terminal_score_scale must be positive")
+    outcome = 1.0 if score_difference > 0 else 0.0 if score_difference < 0 else 0.5
+    win_reward = 2.0 * outcome - 1.0
+    margin_reward = float(score_coefficient) * math.tanh(score_difference / score_scale)
+    return outcome, win_reward + margin_reward
 
 
 def _cpu_state_dict(model: Any) -> dict[str, Any]:
@@ -159,6 +338,11 @@ def _collect_episode(
     tokenizer: ObservationTokenizer,
     codec: JointActionCodec,
     episode_steps: int,
+    terminal_score_coefficient: float,
+    terminal_score_scale: float,
+    shaping_profile: str,
+    shaping_scale: float,
+    shaping_coefficient: float,
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     env = KaggricultureEnv(configuration={"episodeSteps": episode_steps})
     observations = env.reset(seed=seed)
@@ -205,7 +389,12 @@ def _collect_episode(
         }
         result = env.step(actions)
         done = result.terminated or result.truncated
-        current_potential = _potential(observations[learner_seat], learner_seat)
+        current_potential = _potential(
+            observations[learner_seat],
+            learner_seat,
+            profile=shaping_profile,
+            scale=shaping_scale,
+        )
         # A zero terminal potential makes the shaping telescope to a policy-
         # independent constant.  The old non-zero terminal potential changed
         # the objective into final cash difference and rewarded PASS-heavy
@@ -213,9 +402,14 @@ def _collect_episode(
         next_potential = (
             0.0
             if done
-            else _potential(result.observations[learner_seat], learner_seat)
+            else _potential(
+                result.observations[learner_seat],
+                learner_seat,
+                profile=shaping_profile,
+                scale=shaping_scale,
+            )
         )
-        reward = gamma * next_potential - current_potential
+        reward = shaping_coefficient * (gamma * next_potential - current_potential)
         final_rewards = result.rewards
         records.append(
             {
@@ -233,9 +427,18 @@ def _collect_episode(
             break
 
     score_difference = final_rewards[learner_seat] - final_rewards[1 - learner_seat]
-    outcome = 1.0 if score_difference > 0 else 0.0 if score_difference < 0 else 0.5
+    outcome, terminal_reward = _terminal_reward(
+        score_difference,
+        score_coefficient=terminal_score_coefficient,
+        score_scale=terminal_score_scale,
+    )
     if records:
-        records[-1]["reward"] += 2.0 * outcome - 1.0
+        records[-1]["reward"] += terminal_reward
+
+    # The official Kaggle environment retains its full replay history.  PPO
+    # only needs the detached encoded records above, so release the environment
+    # before the optimizer batch is assembled.
+    env.close()
 
     advantage = 0.0
     next_value = 0.0
@@ -282,14 +485,41 @@ def _update(
     entropy_coeff: float,
     grad_clip: float,
     target_kl: float,
+    reference_model: Any | None = None,
+    reference_coeff: float = 0.0,
 ) -> dict[str, float]:
+    """Apply a conservative PPO update with an optional frozen BC anchor.
+
+    The anchor is intentionally evaluated on the exact prefix-conditioned masks
+    stored in the rollout.  This prevents a large Transformer from drifting
+    away from the legal, behaviour-cloned action distribution after a handful
+    of noisy long-horizon games.
+    """
+
     torch = _torch()
-    model.train()
+    if reference_coeff < 0:
+        raise ValueError("reference_coeff must be non-negative")
+    if reference_coeff and reference_model is None:
+        raise ValueError("reference_coeff requires a frozen reference model")
+    # Rollouts are sampled under ``learner.eval()``.  Transformer dropout must
+    # remain disabled while recomputing their log probabilities, otherwise PPO
+    # compares a deterministic behaviour policy with a different random policy
+    # every minibatch and reports an artificial KL spike.
+    model.eval()
+    if reference_model is not None:
+        reference_model.eval()
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
     sample_count = len(batch["advantage"])
-    totals = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "kl": 0.0}
+    totals = {
+        "policy_loss": 0.0,
+        "value_loss": 0.0,
+        "entropy": 0.0,
+        "kl": 0.0,
+        "reference_kl": 0.0,
+    }
     updates = 0
     stopped_early = False
+    max_kl = 0.0
     for _ in range(epochs):
         indices = torch.randperm(sample_count)
         for start in range(0, sample_count, minibatch_size):
@@ -321,25 +551,74 @@ def _update(
                 entropy = (
                     (distribution.entropy() * policy_slot_mask).sum(dim=-1) / normalizer
                 ).mean()
-                loss = policy_loss + value_coeff * value_loss - entropy_coeff * entropy
+                reference_kl = torch.zeros((), dtype=torch.float32, device=device)
+                if reference_model is not None:
+                    with torch.no_grad():
+                        reference_logits, _ = reference_model(
+                            tensors["tokens"],
+                            tensors["types"],
+                            tensors["attention"],
+                            tensors["action_mask"],
+                        )
+                    reference_distribution = torch.distributions.Categorical(
+                        logits=reference_logits.float()
+                    )
+                    reference_kl = (
+                        (
+                            torch.distributions.kl_divergence(
+                                distribution, reference_distribution
+                            )
+                            * policy_slot_mask
+                        ).sum(dim=-1)
+                        / normalizer
+                    ).mean()
+                loss = (
+                    policy_loss
+                    + value_coeff * value_loss
+                    - entropy_coeff * entropy
+                    + reference_coeff * reference_kl
+                )
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             scaler.step(optimizer)
             scaler.update()
             with torch.no_grad():
-                approximate_kl = (tensors["old_log_probability"] - log_probability).mean()
+                # Measure KL after the optimizer step.  The old implementation
+                # checked logits computed before that step, allowing a noisy
+                # minibatch to overshoot the trust region by up to an epoch.
+                post_logits, _ = model(
+                    tensors["tokens"],
+                    tensors["types"],
+                    tensors["attention"],
+                    tensors["action_mask"],
+                )
+                post_distribution = torch.distributions.Categorical(
+                    logits=post_logits.float()
+                )
+                post_log_probability = (
+                    post_distribution.log_prob(tensors["actions"]) * policy_slot_mask
+                ).sum(dim=-1) / normalizer
+                approximate_kl = (
+                    tensors["old_log_probability"] - post_log_probability
+                ).mean()
             totals["policy_loss"] += float(policy_loss.item())
             totals["value_loss"] += float(value_loss.item())
             totals["entropy"] += float(entropy.item())
             totals["kl"] += float(approximate_kl.item())
+            totals["reference_kl"] += float(reference_kl.item())
             updates += 1
-            if updates >= 2 and float(approximate_kl.item()) > target_kl:
+            max_kl = max(max_kl, float(approximate_kl.item()))
+            if float(approximate_kl.item()) > target_kl:
                 stopped_early = True
                 break
         if stopped_early:
             break
-    return {key: value / max(1, updates) for key, value in totals.items()}
+    result = {key: value / max(1, updates) for key, value in totals.items()}
+    result["kl_max"] = max_kl
+    result["kl_early_stop"] = 1.0 if stopped_early else 0.0
+    result["update_steps"] = float(updates)
+    return result
 
 
 def _write_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -389,6 +668,10 @@ def run_native_self_play(
         lr=float(training.get("lr", 3e-4)),
         weight_decay=float(native.get("weight_decay", 0.01)),
     )
+    reference_model: Any | None = None
+    reference_coeff = float(native.get("bc_anchor_coeff", 0.0))
+    if reference_coeff < 0:
+        raise ValueError("native.bc_anchor_coeff must be non-negative")
     snapshots = [_cpu_state_dict(model)]
     snapshot_stats: list[dict[str, float]] = [{"games": 0.0, "wins": 0.0}]
     promotion_outcomes: list[float] = []
@@ -400,6 +683,10 @@ def run_native_self_play(
             raise ValueError("unsupported native PPO checkpoint")
         model.load_state_dict(payload["model"])
         optimizer.load_state_dict(payload["optimizer"])
+        # A recovery config is allowed to lower the step size; otherwise a
+        # checkpoint silently restores the unstable optimizer learning rate.
+        for parameter_group in optimizer.param_groups:
+            parameter_group["lr"] = float(training.get("lr", 3e-4))
         snapshots = payload.get("snapshots", snapshots)
         snapshot_stats = payload.get("snapshot_stats", snapshot_stats)
         promotion_outcomes = [float(value) for value in payload.get("promotion_outcomes", [])]
@@ -407,12 +694,35 @@ def run_native_self_play(
             float(value) for value in payload.get("scripted_promotion_outcomes", [])
         ]
         start_iteration = int(payload.get("iteration", 0))
+        if reference_coeff:
+            reference_state = payload.get("reference_model")
+            if reference_state is None:
+                if not bc_checkpoint:
+                    raise ValueError(
+                        "resuming with native.bc_anchor_coeff requires a checkpoint "
+                        "containing reference_model or --bc-checkpoint"
+                    )
+                bc_payload = torch.load(bc_checkpoint, map_location="cpu", weights_only=False)
+                if bc_payload.get("format") != "farmer-rl-bc/v1":
+                    raise ValueError("unsupported behavior-cloning checkpoint")
+                reference_state = bc_payload["state_dict"]
+            reference_model = build_actor_critic(model_config).to(device)
+            reference_model.load_state_dict(reference_state, strict=True)
+            reference_model.eval()
+            for parameter in reference_model.parameters():
+                parameter.requires_grad_(False)
     elif bc_checkpoint:
         payload = torch.load(bc_checkpoint, map_location="cpu", weights_only=False)
         if payload.get("format") != "farmer-rl-bc/v1":
             raise ValueError("unsupported behavior-cloning checkpoint")
         model.load_state_dict(payload["state_dict"], strict=True)
         snapshots = [_cpu_state_dict(model)]
+        if reference_coeff:
+            reference_model = deepcopy(model).eval()
+            for parameter in reference_model.parameters():
+                parameter.requires_grad_(False)
+    elif reference_coeff:
+        raise ValueError("native.bc_anchor_coeff requires --bc-checkpoint")
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -425,6 +735,17 @@ def run_native_self_play(
     gae_lambda = float(training.get("gae_lambda", 0.95))
     target_steps = int(native.get("train_batch_steps", 2880))
     episode_steps = int(config.get("environment", {}).get("configuration", {}).get("episodeSteps", 720))
+    terminal_score_coefficient = float(training.get("terminal_score_coeff", 0.0))
+    terminal_score_scale = float(training.get("terminal_score_scale", 1000.0))
+    shaping_profile = str(training.get("shaping_profile", "liquidation_v1"))
+    shaping_scale = float(training.get("shaping_scale", 10_000.0))
+    shaping_coefficient = float(training.get("shaping_coefficient", 1.0))
+    if terminal_score_scale <= 0:
+        raise ValueError("training.terminal_score_scale must be positive")
+    if shaping_coefficient < 0:
+        raise ValueError("training.shaping_coefficient must be non-negative")
+    # Validate before starting an expensive rollout rather than at step one.
+    _potential({}, 0, profile=shaping_profile, scale=shaping_scale)
     tokenizer = ObservationTokenizer(max_tokens=model_config.max_tokens)
     codec = JointActionCodec(
         CandidateGenerator(capacity=model_config.candidate_capacity),
@@ -471,6 +792,11 @@ def run_native_self_play(
                 tokenizer=tokenizer,
                 codec=codec,
                 episode_steps=episode_steps,
+                terminal_score_coefficient=terminal_score_coefficient,
+                terminal_score_scale=terminal_score_scale,
+                shaping_profile=shaping_profile,
+                shaping_scale=shaping_scale,
+                shaping_coefficient=shaping_coefficient,
             )
             records.extend(episode_records)
             outcome = float(episode_metrics["outcome"])
@@ -499,6 +825,8 @@ def run_native_self_play(
             entropy_coeff=float(native.get("entropy_coeff", 0.002)),
             grad_clip=float(native.get("grad_clip", 1.0)),
             target_kl=float(native.get("target_kl", 0.03)),
+            reference_model=reference_model,
+            reference_coeff=reference_coeff,
         )
         promotion_interval = int(self_play.get("promotion_interval", 5))
         pool_size = int(self_play.get("checkpoint_slots", 4))
@@ -563,7 +891,10 @@ def run_native_self_play(
             "pool_size": len(snapshots),
             "device": device.type,
             "cuda_peak_gib": torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0.0,
-            "kl_early_stop": bool(update_metrics["kl"] > float(native.get("target_kl", 0.03))),
+            "kl_early_stop": bool(update_metrics.pop("kl_early_stop")),
+            "shaping_profile": shaping_profile,
+            "shaping_scale": shaping_scale,
+            "shaping_coefficient": shaping_coefficient,
             **update_metrics,
         }
         history.append(metrics)
@@ -585,6 +916,9 @@ def run_native_self_play(
                     "snapshot_stats": snapshot_stats,
                     "promotion_outcomes": promotion_outcomes,
                     "scripted_promotion_outcomes": scripted_promotion_outcomes,
+                    "reference_model": (
+                        _cpu_state_dict(reference_model) if reference_model is not None else None
+                    ),
                 },
                 checkpoint_path,
             )

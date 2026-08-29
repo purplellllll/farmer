@@ -1,9 +1,9 @@
 param(
     [int]$Iterations = 600,
-    [string]$Config = "configs/rl/local_4060_recovery_v2.json",
+    [string]$Config = "configs/rl/local_4060_recovery_v5.json",
     [string]$BcCheckpoint = "checkpoints/starter_bc_v5.pt",
     [string]$Resume = "",
-    [string]$OutputDir = "artifacts/local-4060-recovery-v2"
+    [string]$OutputDir = "artifacts/local-4060-recovery-v5"
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,12 +28,22 @@ $resumePath = $null
 if ($Resume) {
     $resumePath = (Resolve-Path (Join-Path $repoRoot $Resume)).Path
     $arguments += @("--resume", $resumePath)
+    # Older PPO checkpoints do not contain the frozen BC anchor. Passing the
+    # original BC checkpoint makes those resumes backward compatible; newer
+    # checkpoints are self-contained and simply ignore this fallback.
+    $bcPath = (Resolve-Path (Join-Path $repoRoot $BcCheckpoint)).Path
+    $arguments += @("--bc-checkpoint", $bcPath)
 } else {
     $bcPath = (Resolve-Path (Join-Path $repoRoot $BcCheckpoint)).Path
     $arguments += @("--bc-checkpoint", $bcPath)
 }
-$stdout = Join-Path $logDir "stdout.log"
-$stderr = Join-Path $logDir "stderr.log"
+$logStem = if ($Resume) {
+    "resume_{0}" -f (Get-Date -Format "yyyyMMdd_HHmmss")
+} else {
+    "initial"
+}
+$stdout = Join-Path $logDir ("{0}.stdout.log" -f $logStem)
+$stderr = Join-Path $logDir ("{0}.stderr.log" -f $logStem)
 $launcher = Start-Process -FilePath $python -ArgumentList $arguments -PassThru -WindowStyle Hidden `
     -WorkingDirectory $repoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr
 $launcher.PriorityClass = "BelowNormal"
@@ -45,7 +55,7 @@ if ($worker) {
     (Get-Process -Id $worker.ProcessId).PriorityClass = "BelowNormal"
 }
 $manifest = [ordered]@{
-    schema_version = "farmer-gpu-rl-process/v2"
+    schema_version = "farmer-gpu-rl-process/v3"
     launcher_pid = $launcher.Id
     worker_pid = if ($worker) { $worker.ProcessId } else { $null }
     device = "cuda"

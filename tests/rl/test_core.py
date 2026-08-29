@@ -15,6 +15,7 @@ from farmer_rl.collector import collect_episode
 from farmer_rl.environment import KaggricultureEnv, pass_action
 from farmer_rl.errors import InvalidActionError, SeatSafetyError
 from farmer_rl.opponents import OpponentPool, OpponentSpec
+from farmer_rl.native_ppo import _potential, _terminal_reward, _update
 from farmer_rl.tokenizer import FEATURE_DIM, ObservationTokenizer, TILE_KINDS
 from farmer_rl.trajectory import EpisodeTrajectory, Transition
 
@@ -119,6 +120,15 @@ class EnvironmentTests(unittest.TestCase):
         env.reset()
         with self.assertRaises(InvalidActionError):
             env.step({0: pass_action(1), 1: pass_action()})
+
+    def test_close_releases_official_environment_history(self):
+        env = KaggricultureEnv(make_fn=fake_make)
+        env.reset()
+        self.assertIsInstance(env.raw_environment, FakeOfficialEnvironment)
+        env.close()
+        self.assertEqual(env._last_observations, {})
+        with self.assertRaises(RuntimeError):
+            _ = env.raw_environment
 
 
 class TrajectoryTests(unittest.TestCase):
@@ -284,8 +294,93 @@ class TokenAndActionTests(unittest.TestCase):
         self.assertEqual(action["hands"][:2], [["PLANT", "WHEAT"], ["PLANT", "WHEAT"]])
         self.assertEqual(action["hands"][2], ["PASS"])
 
+    def test_hire_candidate_stops_at_bounded_hand_count(self):
+        obs = observation(0, hands=8)
+        candidates = CandidateGenerator(capacity=64).market_candidates(obs, 0).candidates
+        self.assertNotIn("HIRE", {candidate.action[0] for candidate in candidates})
+
 
 class OpponentAndConfigTests(unittest.TestCase):
+    def test_productive_shaping_preserves_planted_capital_and_values_maturity(self):
+        seed_state = observation(0)
+        seed_state["farms"][0]["money"] = seed_state["farms"][1]["money"]
+        seed_state["farms"][0]["tiles"][0][0] = None
+        seed_state["private"]["shed"] = {}
+        seed_state["private"]["seeds"] = {"WHEAT": 1}
+
+        planted_state = deepcopy(seed_state)
+        planted_state["private"]["seeds"] = {}
+        planted_state["farms"][0]["tiles"][0][0] = {
+            "kind": "PLANT",
+            "crop": "WHEAT",
+            "planted_day": 0,
+            "watered_today": False,
+            "consecutive_unwatered": 1,
+            "yield_units": 0,
+        }
+        mature_state = deepcopy(planted_state)
+        mature_state["day"] = 2
+        mature_state["farms"][0]["tiles"][0][0].update(
+            watered_today=True,
+            consecutive_unwatered=0,
+            yield_units=2,
+        )
+
+        self.assertLess(_potential(planted_state, 0), _potential(seed_state, 0))
+        self.assertAlmostEqual(
+            _potential(planted_state, 0, profile="production_cycle_v2"),
+            _potential(seed_state, 0, profile="production_cycle_v2"),
+        )
+        self.assertGreater(
+            _potential(mature_state, 0, profile="production_cycle_v2"),
+            _potential(planted_state, 0, profile="production_cycle_v2"),
+        )
+
+    def test_shaping_profile_is_validated(self):
+        with self.assertRaises(ValueError):
+            _potential(observation(0), 0, profile="unknown")
+        with self.assertRaises(ValueError):
+            _potential(observation(0), 0, scale=0)
+
+    def test_cashflow_shaping_rewards_liquidation_stages(self):
+        seed_state = observation(0)
+        seed_state["farms"][0]["money"] = seed_state["farms"][1]["money"]
+        seed_state["farms"][0]["tiles"][0][0] = None
+        seed_state["private"]["shed"] = {}
+        seed_state["private"]["seeds"] = {"WHEAT": 1}
+        seed_state["market"]["prices"]["WHEAT"] = 25
+
+        harvested_state = deepcopy(seed_state)
+        harvested_state["private"]["seeds"] = {}
+        harvested_state["private"]["shed"] = {"WHEAT": 1}
+
+        sold_state = deepcopy(harvested_state)
+        sold_state["private"]["shed"] = {}
+        sold_state["farms"][0]["money"] += 25
+
+        self.assertGreater(
+            _potential(harvested_state, 0, profile="cashflow_cycle_v4"),
+            _potential(seed_state, 0, profile="cashflow_cycle_v4"),
+        )
+        self.assertGreater(
+            _potential(sold_state, 0, profile="cashflow_cycle_v4"),
+            _potential(harvested_state, 0, profile="cashflow_cycle_v4"),
+        )
+
+    def test_terminal_reward_preserves_win_order_and_dense_loss_margin(self):
+        close_outcome, close_reward = _terminal_reward(
+            -100, score_coefficient=0.25, score_scale=1000
+        )
+        bad_outcome, bad_reward = _terminal_reward(
+            -3000, score_coefficient=0.25, score_scale=1000
+        )
+        win_outcome, win_reward = _terminal_reward(
+            1, score_coefficient=0.25, score_scale=1000
+        )
+        self.assertEqual((close_outcome, bad_outcome, win_outcome), (0.0, 0.0, 1.0))
+        self.assertGreater(close_reward, bad_reward)
+        self.assertGreater(win_reward, close_reward)
+
     def test_pfsp_prefers_near_even_opponent(self):
         pool = OpponentPool(
             (
@@ -305,6 +400,10 @@ class OpponentAndConfigTests(unittest.TestCase):
             "ppo.json",
             "local_4060.json",
             "local_4060_recovery_v2.json",
+            "local_4060_recovery_v5.json",
+            "cpu_recovery_v3.json",
+            "cpu_recovery_v5.json",
+            "cpu_recovery_v6.json",
             "cpu_v2.json",
             "cpu_v2_smoke.json",
             "population.json",
@@ -324,6 +423,57 @@ class OpponentAndConfigTests(unittest.TestCase):
         with (root / "configs" / "rl" / "data_manifest.example.json").open(encoding="utf-8") as handle:
             example = json.load(handle)
         jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(example)
+
+
+@unittest.skipUnless(importlib.util.find_spec("torch"), "torch is optional")
+class NativePpoStabilityTests(unittest.TestCase):
+    def test_update_keeps_dropout_disabled_for_rollout_parity(self):
+        import torch
+        from torch import nn
+
+        class TinyActorCritic(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.logits = nn.Parameter(torch.zeros(1, 1, 2))
+                self.value = nn.Parameter(torch.zeros(1))
+                self.dropout = nn.Dropout(0.9)
+
+            def forward(self, values, _types, _attention, action_mask):
+                logits = self.dropout(self.logits).expand(values.shape[0], -1, -1)
+                return logits.masked_fill(~action_mask, torch.finfo(logits.dtype).min), self.value.expand(values.shape[0])
+
+        model = TinyActorCritic()
+        model.train()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
+        batch = {
+            "tokens": torch.zeros(2, 1, 1),
+            "types": torch.zeros(2, 1, dtype=torch.long),
+            "attention": torch.ones(2, 1, dtype=torch.bool),
+            "action_mask": torch.ones(2, 1, 2, dtype=torch.bool),
+            "actions": torch.zeros(2, 1, dtype=torch.long),
+            "policy_slot_mask": torch.ones(2, 1),
+            "old_log_probability": torch.full((2,), -0.69314718),
+            "old_value": torch.zeros(2),
+            "advantage": torch.tensor([1.0, -1.0]),
+            "return": torch.zeros(2),
+        }
+
+        metrics = _update(
+            model,
+            optimizer,
+            batch,
+            device=torch.device("cpu"),
+            minibatch_size=2,
+            epochs=1,
+            clip_param=0.1,
+            value_coeff=0.5,
+            entropy_coeff=0.0,
+            grad_clip=1.0,
+            target_kl=1.0,
+        )
+
+        self.assertFalse(model.training)
+        self.assertEqual(metrics["kl_early_stop"], 0.0)
 
 
 if __name__ == "__main__":

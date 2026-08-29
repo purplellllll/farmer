@@ -36,10 +36,11 @@
     "terminal_score_scale": 1000.0
   },
   "native": {
-    "device": "cuda",
-    "seed": 20260827,
-    "train_batch_steps": 2288,
-    "minibatch_size": 32,
+    "device": "cpu",
+    "cpu_threads": 4,
+    "seed": 20260828,
+    "train_batch_steps": 286,
+    "minibatch_size": 4,
     "update_epochs": 2,
     "entropy_coeff": 0.005,
     "value_coeff": 0.5,

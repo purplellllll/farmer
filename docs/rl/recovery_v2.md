@@ -30,9 +30,14 @@ checkpoint 没有非有限参数，但最近 50 轮胜率为 0、平均分差约
   按仍有选择空间的槽归一化。
 - 终止状态 potential 强制为 0；中间 shaping 使用本人可见资产的保守清算代理，但
   telescoping 后不改变终局胜负目标。
+- 终局另外加入 `0.25*tanh(score_difference/1000)` 辅助项，使全败阶段仍能区分少输与
+  惨败；checkpoint 晋升依然只看真实胜率，不能靠分差辅助项绕过门槛。
 - 晋升同时要求历史快照窗口和 scripted 窗口过线。
 - recovery 阶段使用 144 step（6 天，足以完成 WHEAT/CARROT 生产周期），每轮固定
   2288 transition，约 16 局；学习率 `1e-5`、2 update epochs、clip `0.1`。
+- 候选生成把总 hand 数限制为 8，避免坍缩策略每回合继续雇工并把环境/候选计算拖慢；
+  固定 16 个 hand 输出槽仍保留，因此模型和旧 BC 权重形状兼容。
+- recovery 阶段每轮保存 checkpoint，并保留最近 12 个，降低 Windows 重启造成的损失。
 
 启动命令：
 
@@ -57,3 +62,21 @@ PASS streak 接近整局。
 
 CPU 后续不应继续 24-step PPO。可选路径是：先扩大并修复 BC teacher，再在独占内存时
 使用至少 144 step；或者只让 CPU 负责离线 BC/评测，把在线 rollout 留给 GPU。
+
+## CPU recovery v3
+
+CPU 新训练不再恢复 24-step optimizer，也不使用动作覆盖导向的弱课程 BC；它从
+`starter_bc_v5.pt` 干净启动，并复用 recovery v2 的前缀条件动作、终局分差辅助奖励、
+脚本基线晋升门槛和最多 8 hand 限制。每局使用 144 step，每轮收集 2 局并交换座位。
+
+官方环境对象会保留完整 replay history。训练记录已经转换为独立 NumPy 数组后，runner
+会显式释放环境引用；后台 supervisor 仍每轮重启一次 worker 并从最新 checkpoint
+恢复，以回收 PyTorch/环境分配器未归还给系统的内存。PPO minibatch 从 32 降至 4；
+worker 私有内存超过 4 GiB 时 supervisor 会触发保护性停止。启动 50 轮：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start_cpu_rl_recovery_v3.ps1 `
+  -Iterations 50 -SegmentIterations 1
+```
+
+独立输出目录为 `artifacts/cpu-rl-recovery-v3`，不会覆盖旧 CPU 或 GPU checkpoint。
